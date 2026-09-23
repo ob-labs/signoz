@@ -718,7 +718,9 @@ func nativeFilterExpression(field string) (string, bool) {
 		"resource.attributes.ant.agent.scene": traceSceneSQL(), "scene": traceSceneSQL(),
 		"attributes.langfuse.trace.tags": traceTagsSQL(), "tags": traceTagsSQL(),
 		"attributes.gen_ai.request.model": traceModelSQL(), "model": traceModelSQL(),
-		"start_time_unix_nano": "start_time_unix_nano", "end_time_unix_nano": "end_time_unix_nano",
+		"resource.attributes.aivision.agent.id":      traceResourceTextSQL("aivision.agent.id"),
+		"resource.attributes.aivision.agent.product": traceResourceTextSQL("aivision.agent.product"),
+		"start_time_unix_nano":                       "start_time_unix_nano", "end_time_unix_nano": "end_time_unix_nano",
 	}
 	expression, ok := expressions[field]
 	return expression, ok
@@ -734,6 +736,10 @@ func nativeFilterDimension(field string) string {
 		return "username"
 	case "attributes.langfuse.trace.tags", "tags":
 		return "tags"
+	case "resource.attributes.aivision.agent.id":
+		return "agent_id"
+	case "resource.attributes.aivision.agent.product":
+		return "agent_product_id"
 	default:
 		return ""
 	}
