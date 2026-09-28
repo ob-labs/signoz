@@ -88,6 +88,9 @@ func (store *oceanBaseStore) listTraces(ctx context.Context, orgID string, param
 	MAX(session_id) AS session_id,
 	` + rootPreferredSQL("COALESCE(NULLIF("+traceAttributeTextSQL("gen_ai.span.kind")+", ''), NULLIF(span_kind, ''))") + ` AS ` + quoteIdentifier("attributes.gen_ai.span.kind") + `,
 	` + rootPreferredSQL("COALESCE(NULLIF("+traceAttributeTextSQL("gen_ai.request.model")+", ''), NULLIF("+traceAttributeTextSQL("gen_ai.response.model")+", ''))") + ` AS ` + quoteIdentifier("attributes.gen_ai.request.model") + `,
+	` + rootPreferredSQL(traceInputSQL()) + ` AS ` + quoteIdentifier("attributes.gen_ai.input.messages") + `,
+	` + rootPreferredSQL(traceOutputSQL()) + ` AS ` + quoteIdentifier("attributes.gen_ai.output.messages") + `,
+	` + rootPreferredSQL(traceToolNameSQL()) + ` AS ` + quoteIdentifier("attributes.gen_ai.tool.call.name") + `,
 	` + rootPreferredSQL(traceTagsSQL()) + ` AS ` + quoteIdentifier("attributes.langfuse.trace.tags") + `,
 	` + rootPreferredSQL(traceEnvSQL()) + ` AS ` + quoteIdentifier("resource.attributes.ant.agent.env") + `,
 	` + rootPreferredSQL(traceSceneSQL()) + ` AS ` + quoteIdentifier("resource.attributes.ant.agent.scene") + `,
@@ -851,7 +854,7 @@ func quoteIdentifier(value string) string {
 }
 
 func rootPreferredSQL(expression string) string {
-	return "COALESCE(MAX(CASE WHEN parent_span_id IS NULL OR parent_span_id = '' THEN " + expression + " END), MAX(" + expression + "))"
+	return "COALESCE(MAX(CASE WHEN parent_span_id IS NULL OR parent_span_id = '' THEN NULLIF(" + expression + ", '') END), MAX(NULLIF(" + expression + ", '')))"
 }
 
 func traceAttributeTextSQL(key string) string {
@@ -888,6 +891,10 @@ func traceInputSQL() string {
 
 func traceOutputSQL() string {
 	return "COALESCE(NULLIF(" + traceAttributeTextSQL("gen_ai.output.messages") + ", ''), NULLIF(" + traceAttributeTextSQL("langfuse.observation.output") + ", ''), NULLIF(" + traceAttributeTextSQL("output") + ", ''), '')"
+}
+
+func traceToolNameSQL() string {
+	return "COALESCE(NULLIF(" + traceAttributeTextSQL("gen_ai.tool.call.name") + ", ''), NULLIF(" + traceAttributeTextSQL("gen_ai.tool.name") + ", ''), NULLIF(" + traceAttributeTextSQL("tool_name") + ", ''), NULLIF(" + traceAttributeTextSQL("agentic.tool.name") + ", ''), '')"
 }
 
 func (store *oceanBaseStore) listTraceFacets(ctx context.Context, orgID string, params nativeListParams) (nativeFacets, error) {
