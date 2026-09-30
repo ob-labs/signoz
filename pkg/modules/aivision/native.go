@@ -452,9 +452,15 @@ FROM ` + store.tracesTable() + ` WHERE ` + whereSQL
 		response.Rows = rows
 		return response, nil
 	default:
-		statement, handled, err := buildCodexDashboardStatement(store, request, whereSQL, args)
+		statement, handled, err := buildFrameworkDashboardStatement(store, request, whereSQL, args)
 		if err != nil {
 			return dashboardResponse{}, err
+		}
+		if !handled {
+			statement, handled, err = buildCodexDashboardStatement(store, request, whereSQL, args)
+			if err != nil {
+				return dashboardResponse{}, err
+			}
 		}
 		if !handled {
 			statement, handled, err = buildTelemetryDashboardStatement(store, request, whereSQL, args)
