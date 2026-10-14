@@ -903,6 +903,24 @@ func traceToolNameSQL() string {
 	return "COALESCE(NULLIF(" + traceAttributeTextSQL("gen_ai.tool.call.name") + ", ''), NULLIF(" + traceAttributeTextSQL("gen_ai.tool.name") + ", ''), NULLIF(" + traceAttributeTextSQL("tool_name") + ", ''), NULLIF(" + traceAttributeTextSQL("agentic.tool.name") + ", ''), '')"
 }
 
+func mcpToolRawNameSQL() string {
+	return "COALESCE(NULLIF(" + traceAttributeTextSQL("agentic.tool.raw_name") + ", ''), NULLIF(" + traceAttributeTextSQL("agentic.tool.name") + ", ''))"
+}
+
+func mcpServerIDSQL() string {
+	return "NULLIF(SUBSTRING_INDEX(SUBSTRING_INDEX(" + mcpToolRawNameSQL() + ", '__', 2), '__', -1), '')"
+}
+
+func mcpToolNameSQL() string {
+	return "NULLIF(SUBSTRING_INDEX(" + mcpToolRawNameSQL() + ", '__', -1), '')"
+}
+
+func mcpToolPredicateSQL() string {
+	return "(" +
+		traceAttributeTextSQL("agentic.tool.type") + " = 'mcp' OR " +
+		"POSITION('mcp__' IN " + mcpToolRawNameSQL() + ") = 1)"
+}
+
 func (store *oceanBaseStore) listTraceFacets(ctx context.Context, orgID string, params nativeListParams) (nativeFacets, error) {
 	return store.nativeFacets(ctx, orgID, params, "trace_id", true)
 }
@@ -1178,6 +1196,127 @@ func (store *oceanBaseStore) getSpanBatch(ctx context.Context, orgID string, par
 		normalizeNativeSpan(row)
 	}
 	return nativeSpanBatchResponse{Spans: rows}, nil
+}
+
+func (store *oceanBaseStore) listMcpTools(ctx context.Context, orgID string, params nativeListParams) (nativeMcpToolsResponse, error) {
+	where, args, err := nativeTraceWhere(orgID, params)
+	if err != nil {
+		return nativeMcpToolsResponse{}, err
+	}
+
+	where += " AND (" + mcpToolPredicateSQL() + ")"
+
+	spanTotalRows, err := store.queryRows(
+		ctx,
+		`SELECT COUNT(*) AS total_items FROM `+store.tracesTable()+` WHERE `+where,
+		args...,
+	)
+	if err != nil {
+		return nativeMcpToolsResponse{}, err
+	}
+	spanTotal, err := firstInt(spanTotalRows, "total_items")
+	if err != nil {
+		return nativeMcpToolsResponse{}, err
+	}
+
+	spanOffset := (params.Page - 1) * params.Limit
+	spanRows, err := store.queryRows(
+		ctx,
+		"SELECT "+nativeSpanProjection+" FROM "+store.tracesTable()+
+			" WHERE "+where+" ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+		append(args, params.Limit, spanOffset)...,
+	)
+	if err != nil {
+		return nativeMcpToolsResponse{}, err
+	}
+	for _, row := range spanRows {
+		if resource, ok := row["resource_attributes"]; ok {
+			row["resource"] = resource
+		}
+		normalizeNativeSpan(row)
+	}
+
+	totalRows, err := store.queryRows(
+		ctx,
+		`SELECT COUNT(*) AS total_items FROM (
+SELECT
+`+mcpServerIDSQL()+` AS server_id,
+`+mcpToolNameSQL()+` AS tool_name
+FROM `+store.tracesTable()+` WHERE `+where+`
+GROUP BY `+mcpServerIDSQL()+`, `+mcpToolNameSQL()+`
+) AS matching_tools`,
+		args...,
+	)
+	if err != nil {
+		return nativeMcpToolsResponse{}, err
+	}
+	total, err := firstInt(totalRows, "total_items")
+	if err != nil {
+		return nativeMcpToolsResponse{}, err
+	}
+
+	offset := (params.Page - 1) * params.Limit
+	rows, err := store.queryRows(
+		ctx,
+		`SELECT
+`+mcpServerIDSQL()+` AS server_id,
+`+mcpToolNameSQL()+` AS tool_name,
+COUNT(*) AS calls,
+COUNT(DISTINCT trace_id) AS trace_count,
+COALESCE(SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END), 0) AS error_count,
+COALESCE(AVG(duration_nano) / 1000000, 0) AS avg_duration_ms,
+COALESCE(MAX(duration_nano) / 1000000, 0) AS max_duration_ms,
+MAX(timestamp) AS last_seen_at
+FROM `+store.tracesTable()+` WHERE `+where+`
+GROUP BY `+mcpServerIDSQL()+`, `+mcpToolNameSQL()+`
+ORDER BY calls DESC, server_id ASC, tool_name ASC
+LIMIT ? OFFSET ?`,
+		append(args, params.Limit, offset)...,
+	)
+	if err != nil {
+		return nativeMcpToolsResponse{}, err
+	}
+	data := make([]nativeMcpToolSummary, 0, len(rows))
+	for _, row := range rows {
+		normalizeNativeTimestamp(row, "last_seen_at")
+		calls, err := asInt64(row["calls"])
+		if err != nil {
+			return nativeMcpToolsResponse{}, err
+		}
+		traceCount, err := asInt64(row["trace_count"])
+		if err != nil {
+			return nativeMcpToolsResponse{}, err
+		}
+		errorCount, err := asInt64(row["error_count"])
+		if err != nil {
+			return nativeMcpToolsResponse{}, err
+		}
+		avgDurationMs, err := asFloat64(row["avg_duration_ms"])
+		if err != nil {
+			return nativeMcpToolsResponse{}, err
+		}
+		maxDurationMs, err := asFloat64(row["max_duration_ms"])
+		if err != nil {
+			return nativeMcpToolsResponse{}, err
+		}
+		summary := nativeMcpToolSummary{
+			ServerID:      optionalNativeText(row["server_id"]),
+			ToolName:      optionalNativeText(row["tool_name"]),
+			Calls:         int(calls),
+			TraceCount:    int(traceCount),
+			ErrorCount:    int(errorCount),
+			AvgDurationMs: avgDurationMs,
+			MaxDurationMs: maxDurationMs,
+			LastSeenAt:    optionalNativeText(row["last_seen_at"]),
+		}
+		data = append(data, summary)
+	}
+	return nativeMcpToolsResponse{
+		Data:     data,
+		Meta:     buildPageMeta(params.Page, params.Limit, int(total)),
+		Spans:    spanRows,
+		SpanMeta: buildPageMeta(params.Page, params.Limit, int(spanTotal)),
+	}, nil
 }
 
 func firstInt(rows []map[string]any, key string) (int64, error) {

@@ -64,6 +64,23 @@ func defaultString(value, fallback string) string {
 	return value
 }
 
+func optionalNativeText(value any) string {
+	switch typed := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return strings.TrimSpace(typed)
+	case []byte:
+		return strings.TrimSpace(string(typed))
+	default:
+		formatted := strings.TrimSpace(fmt.Sprint(typed))
+		if formatted == "<nil>" {
+			return ""
+		}
+		return formatted
+	}
+}
+
 func telemetryTable(prefix, suffix string) string {
 	if prefix == "" {
 		prefix = "signoz"

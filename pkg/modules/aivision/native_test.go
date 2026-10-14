@@ -124,6 +124,46 @@ func TestDecodeNativeTags(t *testing.T) {
 	}
 }
 
+func TestMcpToolSQLHelpersReuseRawNameAndType(t *testing.T) {
+	serverIDSQL := mcpServerIDSQL()
+	toolNameSQL := mcpToolNameSQL()
+	predicate := mcpToolPredicateSQL()
+
+	tests := []struct {
+		name      string
+		source    string
+		fragments []string
+	}{
+		{
+			name:      "server id",
+			source:    serverIDSQL,
+			fragments: []string{"agentic.tool.raw_name", "agentic.tool.name", "SUBSTRING_INDEX"},
+		},
+		{
+			name:      "tool name",
+			source:    toolNameSQL,
+			fragments: []string{"agentic.tool.raw_name", "agentic.tool.name", "SUBSTRING_INDEX"},
+		},
+		{
+			name:   "predicate",
+			source: predicate,
+			fragments: []string{
+				`JSON_UNQUOTE(JSON_EXTRACT(attributes, '$."agentic.tool.type"')) = 'mcp'`,
+				"POSITION('mcp__' IN",
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			for _, fragment := range test.fragments {
+				if !strings.Contains(test.source, fragment) {
+					t.Fatalf("SQL %q does not contain %q", test.source, fragment)
+				}
+			}
+		})
+	}
+}
+
 func assertEqual(t *testing.T, label string, got, want any) {
 	t.Helper()
 	if !reflect.DeepEqual(got, want) {

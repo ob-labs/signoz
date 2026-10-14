@@ -85,6 +85,24 @@ type nativeSpanBatchResponse struct {
 	Spans []map[string]any `json:"spans"`
 }
 
+type nativeMcpToolSummary struct {
+	ServerID      string  `json:"server_id"`
+	ToolName      string  `json:"tool_name"`
+	Calls         int     `json:"calls"`
+	TraceCount    int     `json:"trace_count"`
+	ErrorCount    int     `json:"error_count"`
+	AvgDurationMs float64 `json:"avg_duration_ms"`
+	MaxDurationMs float64 `json:"max_duration_ms"`
+	LastSeenAt    string  `json:"last_seen_at"`
+}
+
+type nativeMcpToolsResponse struct {
+	Data     []nativeMcpToolSummary `json:"data"`
+	Meta     pageMeta               `json:"meta"`
+	Spans    []map[string]any       `json:"spans"`
+	SpanMeta pageMeta               `json:"spanMeta"`
+}
+
 type dashboardRequest struct {
 	QueryKey     string         `json:"queryKey"`
 	Scope        string         `json:"scope"`
