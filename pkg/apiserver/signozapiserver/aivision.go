@@ -31,6 +31,7 @@ func (provider *provider) addAIVisionRoutes(router *mux.Router) error {
 		{"traces/usage", "POST", "TraceUsage", h.TraceUsageBatch, traces},
 		{"traces/{traceID}", "GET", "TraceDetail", h.TraceDetail, traces},
 		{"spans/batch", "POST", "SpanBatch", h.SpanBatch, traces},
+		{"mcp/tools", "GET", "McpTools", h.McpTools, traces},
 		{"sessions", "GET", "Sessions", h.Sessions, traces},
 		{"sessions/io", "POST", "SessionIO", h.SessionIOBatch, traces},
 		{"sessions/usage", "POST", "SessionUsage", h.SessionUsageBatch, traces},
