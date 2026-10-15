@@ -1,8 +1,10 @@
 package aivision
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
+	"math/big"
 	"strconv"
 	"strings"
 	"time"
@@ -37,6 +39,21 @@ func asInt64(value any) (int64, error) {
 		return int64(typed), nil
 	case string:
 		return strconv.ParseInt(typed, 10, 64)
+	case json.Number:
+		if integer, err := typed.Int64(); err == nil {
+			return integer, nil
+		}
+		// Keep the former fractional/exponent truncation behavior without
+		// routing large nanosecond values through an imprecise float64.
+		rational, ok := new(big.Rat).SetString(typed.String())
+		if !ok {
+			return 0, fmt.Errorf("expected integer, got %q", typed)
+		}
+		integer := new(big.Int).Quo(rational.Num(), rational.Denom())
+		if !integer.IsInt64() {
+			return 0, fmt.Errorf("integer overflow")
+		}
+		return integer.Int64(), nil
 	default:
 		return 0, fmt.Errorf("expected integer, got %T", value)
 	}

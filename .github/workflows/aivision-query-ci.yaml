@@ -1,0 +1,30 @@
+name: AI Vision query regression
+
+on:
+  pull_request:
+    paths:
+      - pkg/modules/aivision/**
+      - pkg/querier/**
+      - pkg/telemetrystore/**
+      - pkg/types/telemetrystoretypes/**
+      - go.mod
+      - go.sum
+      - .github/workflows/aivision-query-ci.yaml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  query-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Check Go formatting
+        run: test -z "$(gofmt -l pkg/modules/aivision)"
+      - name: Test AI Vision query and HTTP projections
+        run: go test -p 2 -count=1 ./pkg/modules/aivision
