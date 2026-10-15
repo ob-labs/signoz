@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"strings"
@@ -74,9 +75,16 @@ func (store *oceanBaseStore) queryRows(ctx context.Context, sql string, args ...
 			}
 			if column == "attributes" || column == "resource_attributes" || column == "events" || column == "links" || column == "payload" || column == "body_json" {
 				if text, ok := value.(string); ok {
+					// OTLP nanosecond timestamps and int64 attributes exceed the
+					// exact range of float64. Preserve their original JSON numbers.
+					decoder := json.NewDecoder(strings.NewReader(text))
+					decoder.UseNumber()
 					var decoded any
-					if json.Unmarshal([]byte(text), &decoded) == nil {
-						row.Data[column] = decoded
+					if decoder.Decode(&decoded) == nil {
+						var trailing any
+						if decoder.Decode(&trailing) == io.EOF {
+							row.Data[column] = decoded
+						}
 					}
 				}
 			}
