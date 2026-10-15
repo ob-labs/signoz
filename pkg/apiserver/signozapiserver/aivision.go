@@ -26,6 +26,7 @@ func (provider *provider) addAIVisionRoutes(router *mux.Router) error {
 		resources          []coretypes.Resource
 	}{
 		{"traces", "GET", "Traces", h.Traces, traces},
+		{"traces/page", "GET", "TracePage", h.TracePage, traces},
 		{"traces/facets", "GET", "TraceFacets", h.TraceFacets, traces},
 		{"traces/io", "POST", "TraceIO", h.TraceIOBatch, traces},
 		{"traces/usage", "POST", "TraceUsage", h.TraceUsageBatch, traces},

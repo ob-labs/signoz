@@ -19,6 +19,7 @@ import (
 
 type Handler interface {
 	Traces(http.ResponseWriter, *http.Request)
+	TracePage(http.ResponseWriter, *http.Request)
 	TraceFacets(http.ResponseWriter, *http.Request)
 	TraceIOBatch(http.ResponseWriter, *http.Request)
 	TraceUsageBatch(http.ResponseWriter, *http.Request)

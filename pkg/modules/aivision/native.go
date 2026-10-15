@@ -17,6 +17,7 @@ type nativeListParams struct {
 	User         string
 	SpaceID      string
 	AgentProduct string
+	AgentUUID    string
 	TraceID      string
 	TraceIDs     []string
 	SessionID    string
