@@ -1,0 +1,25 @@
+# This allowlist applies only to Dockerfile.ob. The community/frontend image
+# keeps using the repository's .dockerignore and its own build inputs.
+**
+!go.mod
+!go.sum
+!LICENSE
+!cmd/
+!cmd/*.go
+!cmd/community/
+!cmd/community/*.go
+!pkg/
+!pkg/**
+!templates/
+!templates/**
+
+# Keep production Go sources and go:embed assets; omit tests and local state.
+**/*_test.go
+**/testdata
+# Markdown under pkg/ includes go:embed integration assets; keep those files.
+**/.env
+**/.env.*
+**/__pycache__
+**/*.db
+**/*.db-shm
+**/*.db-wal
