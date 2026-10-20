@@ -14,7 +14,8 @@
 #
 # The binary is cross-compiled on the build platform (no QEMU): every store
 # driver in use (modernc.org/sqlite, go-sql-driver/mysql) is pure Go, which is
-# also how the upstream Makefile produces its arm64 build.
+# also how the upstream Makefile produces its arm64 build. The final image
+# contains only the static binary, CA certificates, templates and license.
 
 # ── Stage 1: build ──────────────────────────────────────────────────────────
 FROM --platform=$BUILDPLATFORM golang:1.25-bookworm AS builder
@@ -32,30 +33,37 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
-COPY . .
+COPY cmd/ ./cmd/
+COPY pkg/ ./pkg/
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -tags timetzdata -ldflags "-s -w" -o /out/signoz ./cmd/community
+    go build -trimpath -tags timetzdata -ldflags "-s -w" -o /out/signoz ./cmd/community
+
+# Prepare the few directories required by SQLite and temporary-file users.
+# These commands run on BUILDPLATFORM, including when targeting arm64.
+RUN mkdir -p /runtime/var/lib/signoz /runtime/tmp /runtime/root \
+    && chmod 1777 /runtime/tmp \
+    && ln -s /app/templates /runtime/root/templates
 
 # ── Stage 2: runtime ────────────────────────────────────────────────────────
-FROM debian:bookworm-slim
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates tzdata \
-    && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /var/lib/signoz
+FROM scratch
 
 WORKDIR /app
+COPY --from=builder /runtime/ /
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /out/signoz /app/signoz
 COPY LICENSE /app/licenses/SigNoz-LICENSE
-# Alertmanager / email templates are resolved relative to the working dir.
+# Preserve /app/templates and the default /root/templates path via the symlink.
 COPY templates /app/templates
 
 # The sqlite metastore defaults to /var/lib/signoz/signoz.db; mount a volume
-# there to persist it across container recreation.
+# there to persist it across container recreation. Time zones are embedded by
+# -tags timetzdata, so no OS tzdata package or Go runtime is needed.
 ENV SIGNOZ_WEB_ENABLED=false
 
+# Native probe for scratch containers: ["CMD", "/app/signoz", "healthcheck"].
+# When apiserver.address uses another port, pass healthcheck --port <port>.
 EXPOSE 8080
 ENTRYPOINT ["/app/signoz"]
 CMD ["server"]

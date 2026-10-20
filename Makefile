@@ -22,6 +22,8 @@ GO_BUILD_LDFLAGS_COMMUNITY 		= $(GO_BUILD_VERSION_LDFLAGS) -X github.com/SigNoz/
 DOCKER_BUILD_ARCHS_COMMUNITY 	= $(addprefix docker-build-community-,$(ARCHS))
 DOCKERFILE_COMMUNITY 			= $(SRC)/cmd/community/Dockerfile
 DOCKER_REGISTRY_COMMUNITY 		?= docker.io/signoz/signoz-community
+DOCKER_IMAGE_OB                 ?= signoz-ob:$(VERSION)
+DOCKER_PLATFORM_OB              ?= linux/$(ARCH)
 JS_BUILD_CONTEXT 				= $(SRC)/frontend
 
 ##############################################################
@@ -136,6 +138,11 @@ js-build: ## Builds the js frontend
 ##############################################################
 # docker commands
 ##############################################################
+.PHONY: docker-build-ob
+docker-build-ob: ## Builds the minimal headless OceanBase image used by AI Vision
+	@docker buildx build --load --platform $(DOCKER_PLATFORM_OB) \
+		-f $(SRC)/cmd/community/Dockerfile.ob -t $(DOCKER_IMAGE_OB) $(SRC)
+
 .PHONY: docker-build-community $(DOCKER_BUILD_ARCHS_COMMUNITY)
 docker-build-community: ## Builds the docker image for community
 docker-build-community: $(DOCKER_BUILD_ARCHS_COMMUNITY)
