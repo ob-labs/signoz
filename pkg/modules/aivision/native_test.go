@@ -164,6 +164,21 @@ func TestMcpToolSQLHelpersReuseRawNameAndType(t *testing.T) {
 	}
 }
 
+func TestSkillSpanSQLPredicateRecallsBothLayers(t *testing.T) {
+	predicate := skillSpanPredicateSQL()
+	for _, fragment := range []string{
+		`JSON_UNQUOTE(JSON_EXTRACT(attributes, '$."agentic.tool.type"')) = 'skill'`,
+		"POSITION('SKILL.md' IN",
+		"agentic.tool.call.arguments",
+		"gen_ai.tool.call.arguments",
+		"gen_ai.tool.call.input",
+	} {
+		if !strings.Contains(predicate, fragment) {
+			t.Fatalf("skill predicate %q does not contain %q", predicate, fragment)
+		}
+	}
+}
+
 func assertEqual(t *testing.T, label string, got, want any) {
 	t.Helper()
 	if !reflect.DeepEqual(got, want) {

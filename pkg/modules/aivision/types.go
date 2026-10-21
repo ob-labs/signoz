@@ -103,6 +103,11 @@ type nativeMcpToolsResponse struct {
 	SpanMeta pageMeta               `json:"spanMeta"`
 }
 
+type nativeSkillSpansResponse struct {
+	Spans    []map[string]any `json:"spans"`
+	SpanMeta pageMeta         `json:"spanMeta"`
+}
+
 type dashboardRequest struct {
 	QueryKey     string         `json:"queryKey"`
 	Scope        string         `json:"scope"`

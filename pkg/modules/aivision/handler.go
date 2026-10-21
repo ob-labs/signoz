@@ -26,6 +26,7 @@ type Handler interface {
 	SpanBatch(http.ResponseWriter, *http.Request)
 	TraceDetail(http.ResponseWriter, *http.Request)
 	McpTools(http.ResponseWriter, *http.Request)
+	SkillSpans(http.ResponseWriter, *http.Request)
 	Sessions(http.ResponseWriter, *http.Request)
 	SessionIOBatch(http.ResponseWriter, *http.Request)
 	SessionUsageBatch(http.ResponseWriter, *http.Request)
@@ -252,6 +253,30 @@ func (h *handler) McpTools(response http.ResponseWriter, request *http.Request) 
 	ctx, cancel := context.WithTimeout(request.Context(), h.cfg.QueryTimeout)
 	defer cancel()
 	result, err := h.backend.listMcpTools(ctx, orgID, params)
+	if err != nil {
+		h.writeBackendError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, result)
+}
+
+func (h *handler) SkillSpans(response http.ResponseWriter, request *http.Request) {
+	orgID, authenticated := h.organization(response, request)
+	if !authenticated {
+		return
+	}
+	if request.Method != http.MethodGet {
+		methodNotAllowed(response, http.MethodGet)
+		return
+	}
+	params, err := h.nativeParams(request)
+	if err != nil {
+		writeAPIError(response, http.StatusBadRequest, "bad_data", err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(request.Context(), h.cfg.QueryTimeout)
+	defer cancel()
+	result, err := h.backend.listSkillSpans(ctx, orgID, params)
 	if err != nil {
 		h.writeBackendError(response, err)
 		return
