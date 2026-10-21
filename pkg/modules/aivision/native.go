@@ -922,6 +922,19 @@ func mcpToolPredicateSQL() string {
 		"POSITION('mcp__' IN " + mcpToolRawNameSQL() + ") = 1)"
 }
 
+// skillSpanPredicateSQL broadly recalls candidate skill spans; the Python
+// side re-judges them with the mirrored resolver (reader gate, writer
+// exclusions), so false positives here are cheap and false negatives are
+// not. Native reports match the authoritative attribute; derived shapes
+// surface through any of the argument payload keys naming a SKILL.md path.
+func skillSpanPredicateSQL() string {
+	return "(" +
+		traceAttributeTextSQL("agentic.tool.type") + " = 'skill' OR " +
+		"POSITION('SKILL.md' IN " + traceAttributeTextSQL("agentic.tool.call.arguments") + ") > 0 OR " +
+		"POSITION('SKILL.md' IN " + traceAttributeTextSQL("gen_ai.tool.call.arguments") + ") > 0 OR " +
+		"POSITION('SKILL.md' IN " + traceAttributeTextSQL("gen_ai.tool.call.input") + ") > 0)"
+}
+
 func (store *oceanBaseStore) listTraceFacets(ctx context.Context, orgID string, params nativeListParams) (nativeFacets, error) {
 	return store.nativeFacets(ctx, orgID, params, "trace_id", true)
 }
@@ -1315,6 +1328,54 @@ LIMIT ? OFFSET ?`,
 	return nativeMcpToolsResponse{
 		Data:     data,
 		Meta:     buildPageMeta(params.Page, params.Limit, int(total)),
+		Spans:    spanRows,
+		SpanMeta: buildPageMeta(params.Page, params.Limit, int(spanTotal)),
+	}, nil
+}
+
+// listSkillSpans returns the window's candidate skill spans for the
+// Python-side skill scan — the storage equivalent of the MCP tools span
+// page, without the per-server aggregation the skill overview does not
+// need (it re-aggregates with the mirrored resolver anyway).
+func (store *oceanBaseStore) listSkillSpans(ctx context.Context, orgID string, params nativeListParams) (nativeSkillSpansResponse, error) {
+	where, args, err := nativeTraceWhere(orgID, params)
+	if err != nil {
+		return nativeSkillSpansResponse{}, err
+	}
+
+	where += " AND (" + skillSpanPredicateSQL() + ")"
+
+	spanTotalRows, err := store.queryRows(
+		ctx,
+		`SELECT COUNT(*) AS total_items FROM `+store.tracesTable()+` WHERE `+where,
+		args...,
+	)
+	if err != nil {
+		return nativeSkillSpansResponse{}, err
+	}
+	spanTotal, err := firstInt(spanTotalRows, "total_items")
+	if err != nil {
+		return nativeSkillSpansResponse{}, err
+	}
+
+	spanOffset := (params.Page - 1) * params.Limit
+	spanRows, err := store.queryRows(
+		ctx,
+		"SELECT "+nativeSpanProjection+" FROM "+store.tracesTable()+
+			" WHERE "+where+" ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+		append(args, params.Limit, spanOffset)...,
+	)
+	if err != nil {
+		return nativeSkillSpansResponse{}, err
+	}
+	for _, row := range spanRows {
+		if resource, ok := row["resource_attributes"]; ok {
+			row["resource"] = resource
+		}
+		normalizeNativeSpan(row)
+	}
+
+	return nativeSkillSpansResponse{
 		Spans:    spanRows,
 		SpanMeta: buildPageMeta(params.Page, params.Limit, int(spanTotal)),
 	}, nil
