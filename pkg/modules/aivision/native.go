@@ -930,6 +930,7 @@ func mcpToolPredicateSQL() string {
 func skillSpanPredicateSQL() string {
 	return "(" +
 		traceAttributeTextSQL("agentic.tool.type") + " = 'skill' OR " +
+		"COALESCE(" + traceAttributeTextSQL("agentic.skill.name") + ", '') != '' OR " +
 		"POSITION('SKILL.md' IN " + traceAttributeTextSQL("agentic.tool.call.arguments") + ") > 0 OR " +
 		"POSITION('SKILL.md' IN " + traceAttributeTextSQL("gen_ai.tool.call.arguments") + ") > 0 OR " +
 		"POSITION('SKILL.md' IN " + traceAttributeTextSQL("gen_ai.tool.call.input") + ") > 0)"
@@ -1362,7 +1363,7 @@ func (store *oceanBaseStore) listSkillSpans(ctx context.Context, orgID string, p
 	spanRows, err := store.queryRows(
 		ctx,
 		"SELECT "+nativeSpanProjection+" FROM "+store.tracesTable()+
-			" WHERE "+where+" ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+			" WHERE "+where+" ORDER BY timestamp DESC, trace_id DESC, span_id DESC LIMIT ? OFFSET ?",
 		append(args, params.Limit, spanOffset)...,
 	)
 	if err != nil {
