@@ -3,6 +3,7 @@ package signoz
 import (
 	"context"
 	"log/slog"
+	"sync"
 
 	"github.com/SigNoz/signoz/pkg/alertmanager"
 	"github.com/SigNoz/signoz/pkg/alertmanager/alertmanagerstore/sqlalertmanagerstore"
@@ -16,6 +17,7 @@ import (
 	"github.com/SigNoz/signoz/pkg/authz"
 	"github.com/SigNoz/signoz/pkg/cache"
 	"github.com/SigNoz/signoz/pkg/emailing"
+	"github.com/SigNoz/signoz/pkg/errors"
 	"github.com/SigNoz/signoz/pkg/factory"
 	"github.com/SigNoz/signoz/pkg/flagger"
 	"github.com/SigNoz/signoz/pkg/gateway"
@@ -101,6 +103,17 @@ type SigNoz struct {
 	Gateway                gateway.Gateway
 	Auditor                auditor.Auditor
 	MeterReporter          meterreporter.Reporter
+	stopOnce               sync.Once
+	stopErr                error
+}
+
+// Stop keeps the shared SQL pool available until every service has finished stopping.
+func (signoz *SigNoz) Stop(ctx context.Context) error {
+	signoz.stopOnce.Do(func() {
+		serviceErr := signoz.Registry.Stop(ctx)
+		signoz.stopErr = errors.Join(serviceErr, signoz.SQLStore.BunDB().Close())
+	})
+	return signoz.stopErr
 }
 
 // newQueryStack assembles the query stack once and returns, in order: the shared
@@ -200,7 +213,7 @@ func New(
 	cloudIntegrationCallback func(sqlstore.SQLStore, dashboard.Module, global.Global, zeus.Zeus, gateway.Gateway, licensing.Licensing, serviceaccount.Module, cloudintegration.Config) (cloudintegration.Module, error),
 	metricReductionRuleModuleCallback func(sqlstore.SQLStore, telemetrystore.TelemetryStore, dashboard.Module, queryparser.QueryParser, licensing.Licensing, flagger.Flagger, telemetrytypes.MetadataStore, factory.ProviderSettings, int) metricreductionrule.Module,
 	rulerProviderFactories func(cache.Cache, alertmanager.Alertmanager, sqlstore.SQLStore, telemetrystore.TelemetryStore, telemetrytypes.MetadataStore, prometheus.Prometheus, organization.Getter, rulestatehistory.Module, querier.Querier, queryparser.QueryParser) factory.NamedMap[factory.ProviderFactory[ruler.Ruler, ruler.Config]],
-) (*SigNoz, error) {
+) (instance *SigNoz, retErr error) {
 	// Initialize instrumentation
 	instrumentation, err := instrumentation.New(ctx, config.Instrumentation, version.Info, "signoz")
 	if err != nil {
@@ -308,6 +321,13 @@ func New(
 	if err != nil {
 		return nil, err
 	}
+
+	// Construction owns the pool until it is transferred to the returned instance.
+	defer func() {
+		if instance == nil {
+			retErr = errors.Join(retErr, sqlstore.BunDB().Close())
+		}
+	}()
 
 	// Initialize telemetrystore from the available telemetrystore provider factories
 	telemetrystore, err := factory.NewProviderFromNamedMap(
@@ -472,6 +492,11 @@ func New(
 	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		if instance == nil {
+			retErr = errors.Join(retErr, authz.Stop(ctx))
+		}
+	}()
 
 	// Initialize notification manager from the available notification manager provider factories
 	nfManager, err := factory.NewProviderFromNamedMap(

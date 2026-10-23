@@ -39,6 +39,7 @@ type Server struct {
 	modelID       string
 	mtx           sync.RWMutex
 	stopChan      chan struct{}
+	stopOnce      sync.Once
 	healthyC      chan struct{}
 }
 
@@ -54,6 +55,9 @@ func NewOpenfgaServer(ctx context.Context, settings factory.ProviderSettings, co
 	openfgaServer, err := openfgapkgserver.NewServerWithOpts(opts...)
 	if err != nil {
 		scopedProviderSettings.Logger().DebugContext(ctx, "failed to create authz server")
+		if openfgaDataStore != nil {
+			openfgaDataStore.Close()
+		}
 		return nil, err
 	}
 
@@ -69,6 +73,10 @@ func NewOpenfgaServer(ctx context.Context, settings factory.ProviderSettings, co
 }
 
 func (server *Server) Start(ctx context.Context) error {
+	// Initialization can fail before Healthy is signaled. Release the OpenFGA
+	// resources in that case too; Stop is safe to call again during shutdown.
+	defer func() { _ = server.Stop(ctx) }()
+
 	storeID, err := server.getOrCreateStore(ctx, openfgaDefaultStore.StringValue())
 	if err != nil {
 		return err
@@ -95,8 +103,10 @@ func (server *Server) Healthy() <-chan struct{} {
 }
 
 func (server *Server) Stop(ctx context.Context) error {
-	server.openfgaServer.Close()
-	close(server.stopChan)
+	server.stopOnce.Do(func() {
+		server.openfgaServer.Close()
+		close(server.stopChan)
+	})
 	return nil
 }
 
