@@ -3,11 +3,13 @@ package oceanbasetelemetrystore
 import (
 	"context"
 	"database/sql"
+	"os"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/SigNoz/signoz/pkg/errors"
 	"github.com/SigNoz/signoz/pkg/factory"
+	"github.com/SigNoz/signoz/pkg/ingest"
 	"github.com/SigNoz/signoz/pkg/telemetrystore"
 	"github.com/SigNoz/signoz/pkg/types/telemetrystoretypes"
 	"github.com/go-sql-driver/mysql"
@@ -65,6 +67,15 @@ func New(ctx context.Context, settings factory.ProviderSettings, config telemetr
 		db.Close()
 		return nil, errors.WrapInternalf(err, errors.CodeInternal, "connect to OceanBase telemetry store")
 	}
+	if os.Getenv("SIGNOZ_AIVISION_TRACE_READ_MODEL_TRACKING_ENABLED") == "true" {
+		initCtx, initCancel := context.WithTimeout(ctx, config.OceanBase.QueryTimeout)
+		err := ingest.InitializeTraceReadModelTracking(initCtx, db, config.OceanBase.TablePrefix)
+		initCancel()
+		if err != nil {
+			db.Close()
+			return nil, errors.WrapInternalf(err, errors.CodeInternal, "initialize trace read-model tracking")
+		}
+	}
 	return &provider{db: db, config: config.OceanBase, hooks: hooks}, nil
 }
 
@@ -112,3 +123,6 @@ func (p *provider) Plan(ctx context.Context, stmt string, args ...any) error {
 func (p *provider) Indexes(context.Context, string, ...any) (telemetrystoretypes.Granules, bool, error) {
 	return telemetrystoretypes.Granules{}, false, telemetrystore.Unsupported("ClickHouse granule indexes")
 }
+
+// SQLDB shares the existing pool with domain operations requiring a transaction.
+func (p *provider) SQLDB() *sql.DB { return p.db }

@@ -30,6 +30,7 @@ import (
 // configured for the query service: the same DSN and table prefix that
 // signoz-ob reads, so write and read share one storage contract.
 type Config struct {
+	TraceReadModelTracking bool
 	// DSN of the OceanBase/seekdb telemetry database (MySQL protocol).
 	DSN string
 	// TablePrefix of the signoz.* flat tables, e.g. "signoz".
@@ -109,6 +110,12 @@ func AddToRouter(router *mux.Router, cfg Config, logger *slog.Logger) error {
 	if err := ensureSchema(context.Background(), db, cfg.TablePrefix); err != nil {
 		_ = db.Close()
 		return err
+	}
+	if cfg.TraceReadModelTracking {
+		if err := EnsureTraceReadModelSchema(context.Background(), db, cfg.TablePrefix); err != nil {
+			db.Close()
+			return err
+		}
 	}
 	ep := &endpoint{
 		cfg:          cfg,
@@ -278,6 +285,13 @@ func (ep *endpoint) insertRows(ctx context.Context, table, columns, upsert strin
 		return fmt.Errorf("begin transaction for %s: %w", table, err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if ep.cfg.TraceReadModelTracking && table == ep.tracesTable {
+		for _, key := range traceSourceKeys(rows) {
+			if err := LockTraceSource(ctx, tx, ep.cfg.TablePrefix, key.OrgID, key.SpaceID, key.TraceID); err != nil {
+				return err
+			}
+		}
+	}
 	stmt, err := tx.PrepareContext(ctx, "INSERT INTO "+table+columns+upsert)
 	if err != nil {
 		return fmt.Errorf("prepare upsert for %s: %w", table, err)
@@ -286,6 +300,11 @@ func (ep *endpoint) insertRows(ctx context.Context, table, columns, upsert strin
 	for _, row := range rows {
 		if _, err := stmt.ExecContext(ctx, row...); err != nil {
 			return fmt.Errorf("upsert row into %s: %w", table, err)
+		}
+	}
+	if ep.cfg.TraceReadModelTracking && table == ep.tracesTable {
+		if err := ep.dirtyTraceSources(ctx, tx, rows); err != nil {
+			return err
 		}
 	}
 	if err := tx.Commit(); err != nil {

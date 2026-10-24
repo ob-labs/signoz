@@ -26,6 +26,10 @@ func (provider *provider) addAIVisionRoutes(router *mux.Router) error {
 		resources          []coretypes.Resource
 	}{
 		{"traces", "GET", "Traces", h.Traces, traces},
+		{"traces/read-model/page", "GET", "ReadModelPage", h.ReadModel, traces},
+		{"traces/read-model/sessions/page", "GET", "SessionReadModelPage", h.ReadModel, traces},
+		{"traces/read-model/snapshot", "GET", "ReadModelSnapshot", h.ReadModel, traces},
+		{"traces/read-model/dirty", "GET", "ReadModelDirty", h.ReadModel, traces},
 		{"traces/page", "GET", "TracePage", h.TracePage, traces},
 		{"traces/facets", "GET", "TraceFacets", h.TraceFacets, traces},
 		{"traces/io", "POST", "TraceIO", h.TraceIOBatch, traces},
@@ -67,6 +71,16 @@ func (provider *provider) addAIVisionRoutes(router *mux.Router) error {
 			Verb: coretypes.VerbRead, Category: coretypes.ActionCategoryDataAccess, Selector: querybuilder.TelemetrySelector,
 			Resources: func(coretypes.ExtractorContext) ([]coretypes.ResourceWithID, error) { return refs, nil },
 		}))).Methods(route.method).GetError(); err != nil {
+			return err
+		}
+	}
+
+	for _, action := range []string{"publish", "backfill"} {
+		secured := provider.authzMiddleware.AdminAccess(provider.authzMiddleware.CheckResources(h.ReadModel, authtypes.SigNozAdminRoleName))
+		def := handler.OpenAPIDef{ID: "AIVisionReadModel" + action, Tags: []string{"ai-vision"}, Summary: action, Request: new(map[string]any), RequestContentType: "application/json", Response: new(map[string]any), ResponseContentType: "application/json", SuccessStatusCode: http.StatusOK, SecuritySchemes: newScopedSecuritySchemes([]string{coretypes.ResourceTelemetryResourceTraces.Scope(coretypes.VerbRead)})}
+		if err := router.Handle("/api/v1/ai-vision/traces/read-model/"+action, handler.New(secured, def, handler.WithResourceDefs(handler.TelemetryResourceDef{Verb: coretypes.VerbRead, Category: coretypes.ActionCategoryDataAccess, Selector: querybuilder.TelemetrySelector, Resources: func(coretypes.ExtractorContext) ([]coretypes.ResourceWithID, error) {
+			return []coretypes.ResourceWithID{{Resource: coretypes.ResourceTelemetryResourceTraces, ID: "ai_vision/" + coretypes.WildCardSelectorString}}, nil
+		}}))).Methods(http.MethodPost).GetError(); err != nil {
 			return err
 		}
 	}
