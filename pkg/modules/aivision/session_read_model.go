@@ -178,10 +178,13 @@ func sessionGroupSQL(org, table string, p sessionReadModelParams, excluded strin
 }
 
 func (s *oceanBaseStore) sessionGroupSQL(org, table string, p sessionReadModelParams, excluded string) (string, []any, error) {
-	return sessionGroupSQLWithStrategy(org, table, p, excluded, s.sessionTokenQueryOptimized)
+	return sessionGroupSQLWithTokenStrategy(org, table, p, excluded, s.sessionTokenQueryOptimized, s.sessionTokenGeneratedReady)
 }
 
 func (s *oceanBaseStore) sessionTokenQueryStrategy(p sessionReadModelParams) string {
+	if s.sessionTokenGeneratedReady && p.MinTotalTokens != nil {
+		return "generated_columns"
+	}
 	if s.sessionTokenQueryOptimized && p.MinTotalTokens != nil {
 		return "json_table"
 	}
@@ -189,6 +192,10 @@ func (s *oceanBaseStore) sessionTokenQueryStrategy(p sessionReadModelParams) str
 }
 
 func sessionGroupSQLWithStrategy(org, table string, p sessionReadModelParams, excluded string, optimized bool) (string, []any, error) {
+	return sessionGroupSQLWithTokenStrategy(org, table, p, excluded, optimized, false)
+}
+
+func sessionGroupSQLWithTokenStrategy(org, table string, p sessionReadModelParams, excluded string, optimized, generated bool) (string, []any, error) {
 	where, scopeArgs, err := sessionScopeSQL(org, p)
 	if err != nil {
 		return "", nil, err
@@ -203,7 +210,13 @@ func sessionGroupSQLWithStrategy(org, table string, p sessionReadModelParams, ex
 		billableCalls, totalTokens = "token_usage.billable_calls", "token_usage.total_tokens"
 		tokenUsageJoin = ",JSON_TABLE(p.row_json,'$' COLUMNS (billable_calls JSON PATH '$.coverage.billableCalls' NULL ON EMPTY ERROR ON ERROR,total_tokens JSON PATH '$.usage.total' NULL ON EMPTY ERROR ON ERROR)) token_usage"
 	}
-	inner := "SELECT p.session_id,p.start_ns,p.end_ns,p.status,CASE WHEN " + match + " THEN 1 ELSE 0 END AS matched,CASE WHEN " + billableCalls + "=0 THEN 0 WHEN " + billableCalls + ">0 AND JSON_TYPE(" + totalTokens + ") IN ('INTEGER','UNSIGNED INTEGER','DOUBLE','DECIMAL') THEN CAST(JSON_UNQUOTE(" + totalTokens + ") AS DECIMAL(65,0)) ELSE NULL END AS trace_tokens,CASE WHEN " + billableCalls + ">0 THEN 1 ELSE 0 END AS billable FROM " + table + " p" + tokenUsageJoin + " WHERE " + where
+	tokenValue := "CASE WHEN " + billableCalls + "=0 THEN 0 WHEN " + billableCalls + ">0 AND JSON_TYPE(" + totalTokens + ") IN ('INTEGER','UNSIGNED INTEGER','DOUBLE','DECIMAL') THEN CAST(JSON_UNQUOTE(" + totalTokens + ") AS DECIMAL(65,0)) ELSE NULL END"
+	billableValue := "CASE WHEN " + billableCalls + ">0 THEN 1 ELSE 0 END"
+	if generated && p.MinTotalTokens != nil {
+		tokenValue, billableValue = "p."+sessionTokenGeneratedValueColumn, "p."+sessionTokenGeneratedBillableColumn
+		tokenUsageJoin = ""
+	}
+	inner := "SELECT p.session_id,p.start_ns,p.end_ns,p.status,CASE WHEN " + match + " THEN 1 ELSE 0 END AS matched," + tokenValue + " AS trace_tokens," + billableValue + " AS billable FROM " + table + " p" + tokenUsageJoin + " WHERE " + where
 	query := "SELECT session_id,COUNT(*) AS trace_count,MAX(COALESCE(end_ns,start_ns)) AS last_activity FROM (" + inner + ") canonical GROUP BY BINARY session_id,session_id HAVING SUM(matched)>0"
 	args := append(append([]any{}, matchArgs...), scopeArgs...)
 	if p.SessionStatus != "" {
@@ -273,6 +286,98 @@ func (s *oceanBaseStore) sessionReadModelCoverage(ctx context.Context, tx *sql.T
 	return "", nil
 }
 
+// Batch only the selected page's bounded summaries. Group selection, matching,
+// counts and facets remain in the same repeatable-read transaction as before.
+func sessionPageBatchRows(ctx context.Context, tx *sql.Tx, table, scope string, scopeArgs []any, match string, matchArgs []any, groups []map[string]any, limit int) (map[string][]map[string]any, string, error) {
+	result := make(map[string][]map[string]any, len(groups))
+	if len(groups) > 50 || len(groups) > limit {
+		return nil, "", fmt.Errorf("invalid session group page size")
+	}
+	if len(groups) == 0 {
+		return result, "", nil
+	}
+	expected := make(map[string]int64, len(groups))
+	clauses := make([]string, 0, len(groups))
+	idArgs := make([]any, 0, 2*len(groups))
+	pageTraces := int64(0)
+	for _, group := range groups {
+		sid, ok := group["session_id"].(string)
+		if !ok || sid == "" {
+			return nil, "", fmt.Errorf("invalid session group identity")
+		}
+		if _, duplicate := expected[sid]; duplicate {
+			return nil, "", fmt.Errorf("duplicate session group identity")
+		}
+		count, err := asInt64(group["trace_count"])
+		if err != nil || count < 1 {
+			return nil, "", fmt.Errorf("invalid session group count")
+		}
+		if count > sessionPageTraceLimit-pageTraces {
+			return nil, "session_page_trace_limit", nil
+		}
+		pageTraces += count
+		expected[sid] = count
+		// The ordinary equality can expose an access relation. Binary equality
+		// remains authoritative for case and boundary whitespace, without any
+		// collation-sensitive deduplication of the requested Session IDs.
+		clauses = append(clauses, "(p.session_id=? AND BINARY p.session_id=BINARY ?)")
+		idArgs = append(idArgs, sid, sid)
+	}
+	where := scope + " AND (" + strings.Join(clauses, " OR ") + ")"
+	args := append(append([]any{}, scopeArgs...), idArgs...)
+	prunedRow := sessionSummarySQL()
+	preflight, err := scanReadModelRows(ctx, tx, "SELECT p.session_id,COUNT(*) AS trace_count,COALESCE(SUM(OCTET_LENGTH("+prunedRow+")+OCTET_LENGTH(p.preview_json)+100),0) AS selected_bytes FROM "+table+" p WHERE "+where+" GROUP BY BINARY p.session_id,p.session_id", args...)
+	if err != nil {
+		return nil, "", err
+	}
+	seen := make(map[string]bool, len(preflight))
+	payloadBytes := int64(0)
+	for _, row := range preflight {
+		sid, ok := row["session_id"].(string)
+		count, countErr := asInt64(row["trace_count"])
+		if !ok || expected[sid] == 0 || seen[sid] || countErr != nil || count != expected[sid] {
+			return nil, "", fmt.Errorf("incomplete canonical session preflight")
+		}
+		seen[sid] = true
+		selectedBytes, sizeErr := asInt64(row["selected_bytes"])
+		if sizeErr != nil {
+			return nil, "", fmt.Errorf("invalid session preflight size")
+		}
+		if selectedBytes < 0 || selectedBytes > sessionPagePayloadLimit-payloadBytes {
+			return nil, "session_page_payload_limit", nil
+		}
+		payloadBytes += selectedBytes
+	}
+	if len(seen) != len(expected) {
+		return nil, "", fmt.Errorf("incomplete canonical session preflight")
+	}
+	fetchArgs := append(append([]any{}, matchArgs...), args...)
+	fetchArgs = append(fetchArgs, sessionPageTraceLimit+1)
+	rows, err := scanReadModelRows(ctx, tx, "SELECT p.session_id AS session_id,p.trace_id AS trace_id,"+prunedRow+" AS row_json,p.preview_json,p.source_revision,CASE WHEN "+match+" THEN 1 ELSE 0 END AS matched FROM "+table+" p WHERE "+where+" ORDER BY BINARY p.session_id ASC,p.start_ns ASC,BINARY p.trace_id ASC LIMIT ?", fetchArgs...)
+	if err != nil {
+		return nil, "", err
+	}
+	if int64(len(rows)) != pageTraces {
+		return nil, "", fmt.Errorf("incomplete canonical session page")
+	}
+	traceIDs := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		sid, ok := row["session_id"].(string)
+		trace, traceOK := row["trace_id"].(string)
+		if !ok || expected[sid] == 0 || !traceOK || !readModelTraceID.MatchString(trace) || traceIDs[trace] {
+			return nil, "", fmt.Errorf("invalid session page membership")
+		}
+		traceIDs[trace] = true
+		result[sid] = append(result[sid], row)
+	}
+	for sid, count := range expected {
+		if int64(len(result[sid])) != count {
+			return nil, "", fmt.Errorf("incomplete canonical session group")
+		}
+	}
+	return result, "", nil
+}
+
 func (s *oceanBaseStore) sessionReadModelPage(ctx context.Context, org string, p sessionReadModelParams) (any, error) {
 	if !s.authoritativeIngest {
 		return readModelUnsupported("authoritative_ingest_not_asserted"), nil
@@ -294,6 +399,24 @@ func (s *oceanBaseStore) sessionReadModelPage(ctx context.Context, org string, p
 		return nil, err
 	} else if reason != "" {
 		return readModelUnsupported(reason), nil
+	}
+	// Resolve optional storage capabilities inside this same read snapshot.
+	// Never mutate the shared store: requests can use different snapshots.
+	queryStore := *s
+	queryStore.sessionTokenGeneratedReady = false
+	generatedReason := "disabled"
+	if s.sessionTokenGeneratedColumns && p.MinTotalTokens != nil {
+		ready, reason, capabilityErr := s.sessionTokenGeneratedCapability(ctx, tx)
+		if capabilityErr != nil {
+			return nil, capabilityErr
+		}
+		queryStore.sessionTokenGeneratedReady, generatedReason = ready, reason
+		if ready {
+			groupSQL, args, err = queryStore.sessionGroupSQL(org, table, p, "")
+			if err != nil {
+				return nil, err
+			}
+		}
 	}
 	var total, windowTotal int
 	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM ("+groupSQL+") sessions", args...).Scan(&total); err != nil {
@@ -322,6 +445,17 @@ func (s *oceanBaseStore) sessionReadModelPage(ctx context.Context, org string, p
 		return nil, err
 	}
 	match, matchArgs := sessionMatchSQL(p, "")
+	var batchRows map[string][]map[string]any
+	if s.sessionPageBatchEnabled {
+		var reason string
+		batchRows, reason, err = sessionPageBatchRows(ctx, tx, table, scope, scopeArgs, match, matchArgs, groups, p.Limit)
+		if err != nil {
+			return nil, err
+		}
+		if reason != "" {
+			return readModelUnsupported(reason), nil
+		}
+	}
 	for _, group := range groups {
 		sid, ok := group["session_id"].(string)
 		if !ok || sid == "" {
@@ -335,23 +469,28 @@ func (s *oceanBaseStore) sessionReadModelPage(ctx context.Context, org string, p
 		if pageTraces > sessionPageTraceLimit {
 			return readModelUnsupported("session_page_trace_limit"), nil
 		}
-		// Check the selected group's bounded summaries before fetching them into
-		// Go. The source documents can contain very large complete root IO; JSON
-		// removal and byte accounting happen inside storage, not after decoding.
-		prunedRow := sessionSummarySQL()
-		sizeArgs := append(append([]any{}, scopeArgs...), sid)
-		var selectedBytes int64
-		if err := tx.QueryRowContext(ctx, "SELECT COALESCE(SUM(OCTET_LENGTH("+prunedRow+")+OCTET_LENGTH(p.preview_json)+100),0) FROM "+table+" p WHERE "+scope+" AND BINARY p.session_id=BINARY ?", sizeArgs...).Scan(&selectedBytes); err != nil {
-			return nil, err
-		}
-		if selectedBytes < 0 || selectedBytes > int64(sessionPagePayloadLimit-payloadBytes) {
-			return readModelUnsupported("session_page_payload_limit"), nil
-		}
-		traceArgs := append(append([]any{}, matchArgs...), scopeArgs...)
-		traceArgs = append(traceArgs, sid, sessionPageTraceLimit+1)
-		rows, err := scanReadModelRows(ctx, tx, "SELECT "+prunedRow+" AS row_json,p.preview_json,p.source_revision,CASE WHEN "+match+" THEN 1 ELSE 0 END AS matched FROM "+table+" p WHERE "+scope+" AND BINARY p.session_id=BINARY ? ORDER BY p.start_ns ASC,BINARY p.trace_id ASC LIMIT ?", traceArgs...)
-		if err != nil {
-			return nil, err
+		var rows []map[string]any
+		if s.sessionPageBatchEnabled {
+			rows = batchRows[sid]
+		} else {
+			// Check the selected group's bounded summaries before fetching them into
+			// Go. The source documents can contain very large complete root IO; JSON
+			// removal and byte accounting happen inside storage, not after decoding.
+			prunedRow := sessionSummarySQL()
+			sizeArgs := append(append([]any{}, scopeArgs...), sid)
+			var selectedBytes int64
+			if err := tx.QueryRowContext(ctx, "SELECT COALESCE(SUM(OCTET_LENGTH("+prunedRow+")+OCTET_LENGTH(p.preview_json)+100),0) FROM "+table+" p WHERE "+scope+" AND BINARY p.session_id=BINARY ?", sizeArgs...).Scan(&selectedBytes); err != nil {
+				return nil, err
+			}
+			if selectedBytes < 0 || selectedBytes > int64(sessionPagePayloadLimit-payloadBytes) {
+				return readModelUnsupported("session_page_payload_limit"), nil
+			}
+			traceArgs := append(append([]any{}, matchArgs...), scopeArgs...)
+			traceArgs = append(traceArgs, sid, sessionPageTraceLimit+1)
+			rows, err = scanReadModelRows(ctx, tx, "SELECT "+prunedRow+" AS row_json,p.preview_json,p.source_revision,CASE WHEN "+match+" THEN 1 ELSE 0 END AS matched FROM "+table+" p WHERE "+scope+" AND BINARY p.session_id=BINARY ? ORDER BY p.start_ns ASC,BINARY p.trace_id ASC LIMIT ?", traceArgs...)
+			if err != nil {
+				return nil, err
+			}
 		}
 		if int64(len(rows)) != count {
 			return nil, fmt.Errorf("incomplete canonical session group")
@@ -371,6 +510,9 @@ func (s *oceanBaseStore) sessionReadModelPage(ctx context.Context, org string, p
 			canonical["attributes.gen_ai.input.messages"], canonical["attributes.gen_ai.output.messages"] = preview["input"], preview["output"]
 			if canonical["session_id"] != sid {
 				return nil, fmt.Errorf("session projection identity mismatch")
+			}
+			if s.sessionPageBatchEnabled && canonical["trace_id"] != raw["trace_id"] {
+				return nil, fmt.Errorf("session projection Trace identity mismatch")
 			}
 			m, e := asInt64(raw["matched"])
 			if e != nil {
@@ -397,7 +539,7 @@ func (s *oceanBaseStore) sessionReadModelPage(ctx context.Context, org string, p
 	}
 	facets := nativeFacets{"env": {}, "username": {}, "tags": {}}
 	for _, dim := range []struct{ key, column string }{{"env", "environment"}, {"username", "username"}, {"tags", "tags_json"}} {
-		selected, selectedArgs, err := s.sessionGroupSQL(org, table, p, dim.key)
+		selected, selectedArgs, err := queryStore.sessionGroupSQL(org, table, p, dim.key)
 		if err != nil {
 			return nil, err
 		}
@@ -426,7 +568,14 @@ func (s *oceanBaseStore) sessionReadModelPage(ctx context.Context, org string, p
 		}
 	}
 	meta := map[string]any{"contract": sessionReadModelContract, "sessionSemantics": "canonical-trace-v1", "environmentSemantics": "root-span-resource-v1", "userIdentitySemantics": "trace-sdk-user-id-v1", "complete": true, "queryMode": "read_model", "projection_context": p.ProjectionContext, "from": p.From, "to": p.To, "space_id": p.SpaceID, "agent_product": p.AgentProduct, "user": p.User, "agent_uuid": p.AgentUUID, "page": p.Page, "limit": p.Limit, "totalItems": total, "totalPages": (total + p.Limit - 1) / p.Limit, "windowTotalItems": windowTotal}
-	meta["sessionTokenQueryStrategy"] = s.sessionTokenQueryStrategy(p)
+	meta["sessionTokenQueryStrategy"] = queryStore.sessionTokenQueryStrategy(p)
+	if s.sessionTokenGeneratedColumns && p.MinTotalTokens != nil {
+		meta["sessionTokenGeneratedColumns"] = generatedReason
+	}
+	meta["sessionPageSummaryStrategy"] = "individual"
+	if s.sessionPageBatchEnabled {
+		meta["sessionPageSummaryStrategy"] = "batch"
+	}
 	result := map[string]any{"supported": true, "data": data, "facets": facets, "meta": meta}
 	encoded, err := json.Marshal(result)
 	if err != nil {

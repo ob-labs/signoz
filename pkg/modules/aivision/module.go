@@ -42,13 +42,16 @@ type Module struct {
 }
 
 type oceanBaseStore struct {
-	db                         *sql.DB
-	readModelEnabled           bool
-	authoritativeIngest        bool
-	sessionTokenQueryOptimized bool
-	telemetryStore             telemetrystore.TelemetryStore
-	querier                    querier.Querier
-	cfg                        config
+	db                           *sql.DB
+	readModelEnabled             bool
+	authoritativeIngest          bool
+	sessionTokenQueryOptimized   bool
+	sessionPageBatchEnabled      bool
+	sessionTokenGeneratedColumns bool
+	sessionTokenGeneratedReady   bool
+	telemetryStore               telemetrystore.TelemetryStore
+	querier                      querier.Querier
+	cfg                          config
 }
 
 func NewModule(settings factory.ProviderSettings, store telemetrystore.TelemetryStore, q querier.Querier, cfg telemetrystore.Config) *Module {
@@ -58,7 +61,7 @@ func NewModule(settings factory.ProviderSettings, store telemetrystore.Telemetry
 	}
 	return &Module{
 		logger: settings.Logger,
-		store: &oceanBaseStore{db: db, sessionTokenQueryOptimized: os.Getenv("SIGNOZ_AIVISION_SESSION_TOKEN_QUERY_OPTIMIZATION_ENABLED") == "true", readModelEnabled: os.Getenv("SIGNOZ_AIVISION_TRACE_READ_MODEL_ENABLED") == "true" && os.Getenv("SIGNOZ_AIVISION_TRACE_READ_MODEL_TRACKING_ENABLED") == "true", authoritativeIngest: os.Getenv("SIGNOZ_AIVISION_TRACE_READ_MODEL_AUTHORITATIVE_INGEST") == "true", telemetryStore: store, querier: q, cfg: config{
+		store: &oceanBaseStore{db: db, sessionTokenQueryOptimized: os.Getenv("SIGNOZ_AIVISION_SESSION_TOKEN_QUERY_OPTIMIZATION_ENABLED") == "true", sessionPageBatchEnabled: os.Getenv("SIGNOZ_AIVISION_SESSION_PAGE_BATCH_ENABLED") == "true", sessionTokenGeneratedColumns: os.Getenv("SIGNOZ_AIVISION_SESSION_TOKEN_GENERATED_COLUMNS_ENABLED") == "true", readModelEnabled: os.Getenv("SIGNOZ_AIVISION_TRACE_READ_MODEL_ENABLED") == "true" && os.Getenv("SIGNOZ_AIVISION_TRACE_READ_MODEL_TRACKING_ENABLED") == "true", authoritativeIngest: os.Getenv("SIGNOZ_AIVISION_TRACE_READ_MODEL_AUTHORITATIVE_INGEST") == "true", telemetryStore: store, querier: q, cfg: config{
 			Enabled: cfg.Provider == "oceanbase", TablePrefix: cfg.OceanBase.TablePrefix,
 			MaxLimit: cfg.OceanBase.MaxResultRows, MaxQueryRange: cfg.OceanBase.MaxQueryRange,
 			QueryTimeout: cfg.OceanBase.QueryTimeout,

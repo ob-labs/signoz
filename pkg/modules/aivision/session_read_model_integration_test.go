@@ -111,6 +111,7 @@ func TestOceanBaseCanonicalSessionReadModel(t *testing.T) {
 	}
 	p := sessionReadModelParams{nativeListParams: nativeListParams{ProjectionContext: contextHash, From: start.UnixMilli(), To: start.Add(time.Minute).UnixMilli(), SpaceID: "scope", User: "subject", AgentProduct: "Codex", AgentUUID: "agent", Page: 1, Limit: 20}}
 	get := func(p sessionReadModelParams) map[string]any {
+		store.sessionPageBatchEnabled = false
 		store.sessionTokenQueryOptimized = false
 		original, e := store.sessionReadModelPage(ctx, org, p)
 		require.NoError(t, e)
@@ -129,6 +130,18 @@ func TestOceanBaseCanonicalSessionReadModel(t *testing.T) {
 		delete(beforeMeta, "sessionTokenQueryStrategy")
 		delete(afterMeta, "sessionTokenQueryStrategy")
 		require.Equal(t, before, after, "same fixture must preserve full response, facets and all other metadata")
+		store.sessionPageBatchEnabled = true
+		batched, e := store.sessionReadModelPage(ctx, org, p)
+		require.NoError(t, e)
+		batch := batched.(map[string]any)
+		batchMeta := batch["meta"].(map[string]any)
+		require.Equal(t, "individual", afterMeta["sessionPageSummaryStrategy"])
+		require.Equal(t, "batch", batchMeta["sessionPageSummaryStrategy"])
+		delete(batchMeta, "sessionTokenQueryStrategy")
+		delete(batchMeta, "sessionPageSummaryStrategy")
+		delete(afterMeta, "sessionPageSummaryStrategy")
+		require.Equal(t, after, batch, "batched summaries preserve complete canonical data, matched turns, facets, ordering and pagination")
+		store.sessionPageBatchEnabled = false
 		return after
 	}
 	result := get(p)
