@@ -18,6 +18,7 @@ import (
 )
 
 type Handler interface {
+	ReadModel(http.ResponseWriter, *http.Request)
 	Traces(http.ResponseWriter, *http.Request)
 	TracePage(http.ResponseWriter, *http.Request)
 	TraceFacets(http.ResponseWriter, *http.Request)

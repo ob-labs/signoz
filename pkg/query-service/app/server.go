@@ -84,10 +84,11 @@ func NewServer(config signoz.Config, signoz *signoz.SigNoz) (*Server, error) {
 	// The gateway forwards verified telemetry to the configured data plane.
 	// Ingest stays disabled unless an internal key is configured.
 	if err := ingest.AddToRouter(r, ingest.Config{
-		DSN:         config.TelemetryStore.OceanBase.DSN,
-		TablePrefix: config.TelemetryStore.OceanBase.TablePrefix,
-		OrgID:       os.Getenv("SIGNOZ_ORG_ID"),
-		InternalKey: os.Getenv("SIGNOZ_INGEST_INTERNAL_KEY"),
+		TraceReadModelTracking: os.Getenv("SIGNOZ_AIVISION_TRACE_READ_MODEL_TRACKING_ENABLED") == "true",
+		DSN:                    config.TelemetryStore.OceanBase.DSN,
+		TablePrefix:            config.TelemetryStore.OceanBase.TablePrefix,
+		OrgID:                  os.Getenv("SIGNOZ_ORG_ID"),
+		InternalKey:            os.Getenv("SIGNOZ_INGEST_INTERNAL_KEY"),
 	}, signoz.Instrumentation.Logger()); err != nil {
 		return nil, err
 	}

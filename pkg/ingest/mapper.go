@@ -249,6 +249,7 @@ const spanInsertColumns = `(
 ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
 
 const spanUpsert = ` ON DUPLICATE KEY UPDATE
+ timestamp=VALUES(timestamp),
  parent_span_id=VALUES(parent_span_id), trace_state=VALUES(trace_state), flags=VALUES(flags),
  span_name=VALUES(span_name), span_kind=VALUES(span_kind), service_name=VALUES(service_name),
  start_time_unix_nano=VALUES(start_time_unix_nano), end_time_unix_nano=VALUES(end_time_unix_nano),
