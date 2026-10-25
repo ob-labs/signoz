@@ -13,6 +13,10 @@ import (
 )
 
 func executeHealthcheck(args ...string) error {
+	command, _, _ := RootCmd.Find([]string{"healthcheck"})
+	if command.Flags().Lookup("ready") != nil {
+		_ = command.Flags().Set("ready", "false")
+	}
 	RootCmd.SetArgs(append([]string{"healthcheck"}, args...))
 	RootCmd.SetOut(io.Discard)
 	RootCmd.SetErr(io.Discard)
@@ -107,5 +111,46 @@ func TestHealthcheckRejectsInvalidArguments(t *testing.T) {
 				t.Fatal("invalid arguments unexpectedly succeeded")
 			}
 		})
+	}
+}
+
+func TestHealthcheckReadinessModes(t *testing.T) {
+	for _, ready := range []bool{false, true} {
+		t.Run(strconv.FormatBool(ready), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				want := "/api/v1/health"
+				if ready {
+					want = "/api/v1/ready"
+				}
+				if r.Method != http.MethodGet || r.URL.RequestURI() != want || r.Header.Get("Authorization") != "" {
+					t.Errorf("unexpected probe request: %s %s", r.Method, r.URL.RequestURI())
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer server.Close()
+			args := []string{"--port", serverPort(t, server)}
+			if ready {
+				args = append(args, "--ready")
+			}
+			if err := executeHealthcheck(args...); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestHealthcheckReadinessFailsWhileLivenessSucceeds(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/ready" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+	}))
+	defer server.Close()
+	port := serverPort(t, server)
+	if err := executeHealthcheck("--port", port, "--ready"); err == nil {
+		t.Fatal("unready telemetry store reported healthy")
+	}
+	if err := executeHealthcheck("--port", port); err != nil {
+		t.Fatalf("readiness failure affected liveness: %v", err)
 	}
 }
