@@ -11,11 +11,7 @@ import (
 )
 
 func expectResumeCleanupLease(mock sqlmock.Sqlmock, generation int64) {
-	mock.ExpectBegin()
-	mock.ExpectQuery("SELECT enabled,generation,schema_version FROM `test_projection_maintenance`").WillReturnRows(sqlmock.NewRows([]string{"enabled", "generation", "schema_version"}).AddRow(false, generation, 1))
-	mock.ExpectQuery("SELECT schema_version FROM `test_projection_maintenance`").WillReturnRows(sqlmock.NewRows([]string{"schema_version"}).AddRow(1))
-	mock.ExpectExec("UPDATE `test_projection_maintenance` SET migration_owner").WithArgs(sqlmock.AnyArg(), ProjectionSchemaVersion, generation).WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectCommit()
+	expectResumeReentryLease(mock, generation, ProjectionSchemaVersion, false)
 }
 
 func expectProjectionCleanupFence(mock sqlmock.Sqlmock, owner any, generation int64, suspended bool) {
@@ -108,8 +104,9 @@ func TestRawWriterCanCommitBetweenProjectionCleanupChunks(t *testing.T) {
 func TestNewOffDuringResumeIsNotOverriddenOrReportedResumed(t *testing.T) {
 	db, mock, _ := sqlmock.New()
 	defer db.Close()
-	expectHealthyMaintenanceInitialization(mock)
+	expectMaintenanceControl(mock)
 	expectResumeCleanupLease(mock, 2)
+	expectResumeSchemaRepair(mock)
 	for _, suffix := range []string{"trace_projections", "trace_sources", "trace_projection_coverage"} {
 		expectProjectionCleanupChunk(mock, suffix, 3, 0, false)
 	}

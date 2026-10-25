@@ -19,6 +19,11 @@ import (
 )
 
 const ProjectionSchemaVersion = 1
+
+// ProjectionRecoveryTimeout bounds explicit operator recovery below the
+// five-minute shared lease. Ordinary startup/migration keeps its two-minute
+// budget and ordinary query/statement deadlines remain unchanged.
+const ProjectionRecoveryTimeout = 4 * time.Minute
 const SessionTokenGeneratedValueColumn = "session_trace_tokens_v1"
 const SessionTokenGeneratedBillableColumn = "session_billable_v1"
 const SessionTokenGeneratedValueExpr = "CASE WHEN JSON_EXTRACT(row_json,'$.coverage.billableCalls')=0 THEN 0 WHEN JSON_EXTRACT(row_json,'$.coverage.billableCalls')>0 AND JSON_TYPE(JSON_EXTRACT(row_json,'$.usage.total')) IN ('INTEGER','UNSIGNED INTEGER','DOUBLE','DECIMAL') THEN CAST(JSON_UNQUOTE(JSON_EXTRACT(row_json,'$.usage.total')) AS DECIMAL(65,0)) ELSE NULL END"
@@ -114,10 +119,12 @@ func SuspendProjectionMaintenance(ctx context.Context, db *sql.DB, prefix string
 }
 
 func ResumeProjectionMaintenance(ctx context.Context, db *sql.DB, prefix string) error {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, ProjectionRecoveryTimeout)
 	defer cancel()
-	// Initialization repairs a full derived-schema rollback without clearing OFF.
-	if err := InitializeTraceReadModelMaintenance(ctx, db, prefix, true); err != nil {
+	// Accept one recovery intent before repair or remaining cleanup. Re-entering
+	// an interrupted schema-zero cleanup must not initialize first and clear a
+	// newer OFF again in a second phase.
+	if err := ensureProjectionMaintenanceControl(ctx, db, prefix); err != nil {
 		return err
 	}
 	table, err := projectionMaintenanceTable(prefix)
@@ -134,14 +141,23 @@ func ResumeProjectionMaintenance(ctx context.Context, db *sql.DB, prefix string)
 		return err
 	}
 	if ready {
-		return tx.Commit()
+		// Check actual rollback state on this already-held connection. Using the
+		// pool here could deadlock a one-connection deployment while the fence is
+		// locked. Healthy recovery is idempotent; missing helpers/tables repair.
+		healthy, err := projectionSchemaReady(ctx, tx, prefix)
+		if err != nil {
+			return err
+		}
+		if healthy {
+			return tx.Commit()
+		}
 	}
 	var version int
 	if err := tx.QueryRowContext(ctx, "SELECT schema_version FROM "+table+" WHERE id=1").Scan(&version); err != nil {
 		return err
 	}
-	if version != ProjectionSchemaVersion {
-		return fmt.Errorf("projection schema migration is incomplete")
+	if version < 0 || version > ProjectionSchemaVersion {
+		return fmt.Errorf("projection schema is newer than this binary or invalid")
 	}
 	owner, err := newProjectionCleanupOwner()
 	if err != nil {
@@ -149,7 +165,7 @@ func ResumeProjectionMaintenance(ctx context.Context, db *sql.DB, prefix string)
 	}
 	// Persist the authorized resume intent while reads remain disabled. A newer
 	// operator OFF or an OFF writer can set suspended=TRUE between cleanup chunks.
-	result, err := tx.ExecContext(ctx, "UPDATE "+table+" SET migration_owner=?,migration_until=UNIX_TIMESTAMP()+300,generation=generation+1,enabled=FALSE,schema_version=0,suspended=FALSE,rebuild_required=TRUE WHERE id=1 AND schema_version=? AND generation=? AND migration_until<UNIX_TIMESTAMP()", owner, ProjectionSchemaVersion, generation)
+	result, err := tx.ExecContext(ctx, "UPDATE "+table+" SET migration_owner=?,migration_until=UNIX_TIMESTAMP()+300,generation=generation+1,enabled=FALSE,schema_version=0,suspended=FALSE,rebuild_required=TRUE WHERE id=1 AND schema_version<=? AND generation=? AND migration_until<UNIX_TIMESTAMP()", owner, ProjectionSchemaVersion, generation)
 	if err != nil {
 		return err
 	}
@@ -165,6 +181,9 @@ func ResumeProjectionMaintenance(ctx context.Context, db *sql.DB, prefix string)
 	}
 	lease := projectionCleanupLease{owner, generation + 1}
 	defer releaseProjectionCleanupLease(ctx, db, prefix, lease)
+	if err := repairProjectionSchema(ctx, db, prefix); err != nil {
+		return err
+	}
 	if err := resetProjectionDerived(ctx, db, prefix, lease); err != nil {
 		return err
 	}
@@ -229,18 +248,23 @@ func InitializeTraceReadModelMaintenance(ctx context.Context, db *sql.DB, prefix
 	// committed cleanup chunks remain a safe, resumable checkpoint.
 	lease := projectionCleanupLease{owner, observedGeneration + 1}
 	defer releaseProjectionCleanupLease(ctx, db, prefix, lease)
-	if err := withProjectionMigrationConnection(ctx, db, func(conn *sql.Conn) error {
-		if err := ensureTraceReadModelSchema(ctx, conn, prefix); err != nil {
-			return err
-		}
-		return migrateSessionTokenColumns(ctx, conn, prefix)
-	}); err != nil {
+	if err := repairProjectionSchema(ctx, db, prefix); err != nil {
 		return err
 	}
 	if err := resetProjectionDerived(ctx, db, prefix, lease); err != nil {
 		return err
 	}
 	return finishProjectionCleanup(ctx, db, prefix, lease, false)
+}
+
+// Shared schema repair does not change the accepted intent, latch or lease.
+func repairProjectionSchema(ctx context.Context, db *sql.DB, prefix string) error {
+	return withProjectionMigrationConnection(ctx, db, func(conn *sql.Conn) error {
+		if err := ensureTraceReadModelSchema(ctx, conn, prefix); err != nil {
+			return err
+		}
+		return migrateSessionTokenColumns(ctx, conn, prefix)
+	})
 }
 
 type projectionSchemaConnection interface {

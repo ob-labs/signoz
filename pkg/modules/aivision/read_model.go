@@ -25,7 +25,7 @@ var readModelTraceID = regexp.MustCompile(`^[0-9a-f]{1,32}$`)
 
 func readModelRequestTimeout(action string, queryTimeout time.Duration) time.Duration {
 	if action == "maintenance/resume" {
-		return 2 * time.Minute
+		return ingest.ProjectionRecoveryTimeout
 	}
 	return queryTimeout
 }
@@ -337,7 +337,11 @@ func decodeReadModelJSON(r *http.Request, v any) error {
 	return nil
 }
 func (s *oceanBaseStore) beginReadModel(ctx context.Context, readOnly bool) (*sql.Tx, error) {
-	return s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: readOnly})
+	isolation := sql.LevelReadCommitted
+	if readOnly {
+		isolation = sql.LevelRepeatableRead
+	}
+	return s.db.BeginTx(ctx, &sql.TxOptions{Isolation: isolation, ReadOnly: readOnly})
 }
 
 func scanReadModelRows(ctx context.Context, tx *sql.Tx, query string, args ...any) ([]map[string]any, error) {
@@ -531,69 +535,157 @@ func (s *oceanBaseStore) publishTraceProjection(ctx context.Context, org string,
 	}
 	return map[string]any{"supported": true, "published": true, "source_revision": revision, "maintenance_generation": generation}, nil
 }
+
+const traceBackfillChunkLimit = 25
+const traceBackfillWorkBudget = 2 * time.Second
+
+type traceBackfillProgress struct {
+	after      string
+	complete   bool
+	enrolled   int
+	generation int64
+}
+
+func (p traceBackfillProgress) response() map[string]any {
+	return map[string]any{"supported": true, "after_trace_id": p.after, "complete": p.complete, "enrolled": p.enrolled}
+}
+
+// A completed coverage cursor is a read-only fact in the same RR snapshot as
+// the maintenance fence. Empty worker polls need not queue behind raw writers.
+func (s *oceanBaseStore) completedTraceBackfill(ctx context.Context, org, space string) (traceBackfillProgress, string, error) {
+	progress := traceBackfillProgress{}
+	tx, err := s.beginReadModel(ctx, true)
+	if err != nil {
+		return progress, "", err
+	}
+	defer tx.Rollback()
+	enabled, generation, err := ingest.ReadProjectionMaintenance(ctx, tx, s.cfg.TablePrefix)
+	if err != nil {
+		return progress, "", err
+	}
+	if !enabled {
+		return progress, "projection_maintenance_unavailable", nil
+	}
+	progress.generation = generation
+	err = tx.QueryRowContext(ctx, "SELECT after_trace_id,complete FROM "+s.readModelTable("trace_projection_coverage")+" WHERE org_id=? AND space_id=?", org, space).Scan(&progress.after, &progress.complete)
+	if err == sql.ErrNoRows {
+		return progress, "", nil
+	}
+	if err != nil {
+		return progress, "", err
+	}
+	if progress.complete {
+		err = tx.Commit()
+	}
+	return progress, "", err
+}
+
 func (s *oceanBaseStore) backfillTraceSources(ctx context.Context, org, space string, limit int) (any, error) {
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if limit < 1 || limit > 500 {
+		return nil, fmt.Errorf("invalid backfill limit")
+	}
+	started := time.Now()
+	progress, reason, err := s.completedTraceBackfill(ctx, org, space)
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback()
-	if reason, err := s.projectionMaintenanceReason(ctx, tx, true); err != nil {
-		return nil, err
-	} else if reason != "" {
+	if reason != "" {
 		return readModelUnsupported(reason), nil
 	}
-	coverage := s.readModelTable("trace_projection_coverage")
-	if _, err := tx.ExecContext(ctx, "INSERT IGNORE INTO "+coverage+" (org_id,space_id) VALUES (?,?)", org, space); err != nil {
-		return nil, err
-	}
-	var after string
-	var complete bool
-	if err := tx.QueryRowContext(ctx, "SELECT after_trace_id,complete FROM "+coverage+" WHERE org_id=? AND space_id=? FOR UPDATE", org, space).Scan(&after, &complete); err != nil {
-		return nil, err
-	}
-	enrolled := 0
-	if !complete {
-		rows, err := scanReadModelRows(ctx, tx, "SELECT trace_id,MIN(timestamp) AS min_timestamp,MAX(timestamp) AS max_timestamp,MIN(user_id) AS user_id,MIN(agent_product) AS agent_product,(COUNT(DISTINCT BINARY user_id)=1 AND MIN(user_id)<>'' AND COUNT(DISTINCT BINARY agent_product)=1 AND MIN(agent_product)<>'') AS scope_valid FROM "+s.tracesTable()+" WHERE org_id=? AND space_id=? AND trace_id>? GROUP BY trace_id ORDER BY trace_id LIMIT ?", org, space, after, limit)
+	for !progress.complete && progress.enrolled < limit {
+		chunkLimit := limit - progress.enrolled
+		if chunkLimit > traceBackfillChunkLimit {
+			chunkLimit = traceBackfillChunkLimit
+		}
+		chunk, reason, err := s.backfillTraceSourceChunk(ctx, org, space, progress.generation, chunkLimit)
 		if err != nil {
 			return nil, err
 		}
+		if reason != "" {
+			return readModelUnsupported(reason), nil
+		}
+		progress.after, progress.complete = chunk.after, chunk.complete
+		progress.enrolled += chunk.enrolled
+		// Only committed work is reported. The budget is checked outside the
+		// transaction, so a cursor can never jump past rolled-back sources.
+		if time.Since(started) >= traceBackfillWorkBudget {
+			break
+		}
+	}
+	return progress.response(), nil
+}
+
+func (s *oceanBaseStore) backfillTraceSourceChunk(ctx context.Context, org, space string, generation int64, limit int) (traceBackfillProgress, string, error) {
+	progress := traceBackfillProgress{generation: generation}
+	tx, err := s.beginReadModel(ctx, false)
+	if err != nil {
+		return progress, "", err
+	}
+	defer tx.Rollback()
+	enabled, currentGeneration, err := ingest.LockProjectionMaintenance(ctx, tx, s.cfg.TablePrefix)
+	if err != nil {
+		return progress, "", err
+	}
+	if !enabled {
+		return progress, "projection_maintenance_unavailable", nil
+	}
+	if currentGeneration != generation {
+		return progress, "maintenance_generation_changed", nil
+	}
+	coverage := s.readModelTable("trace_projection_coverage")
+	if _, err := tx.ExecContext(ctx, "INSERT IGNORE INTO "+coverage+" (org_id,space_id) VALUES (?,?)", org, space); err != nil {
+		return progress, "", err
+	}
+	if err := tx.QueryRowContext(ctx, "SELECT after_trace_id,complete FROM "+coverage+" WHERE org_id=? AND space_id=? FOR UPDATE", org, space).Scan(&progress.after, &progress.complete); err != nil {
+		return progress, "", err
+	}
+	if !progress.complete {
+		rows, err := scanReadModelRows(ctx, tx, "SELECT trace_id,MIN(timestamp) AS min_timestamp,MAX(timestamp) AS max_timestamp,MIN(user_id) AS user_id,MIN(agent_product) AS agent_product,(COUNT(DISTINCT BINARY user_id)=1 AND MIN(user_id)<>'' AND COUNT(DISTINCT BINARY agent_product)=1 AND MIN(agent_product)<>'') AS scope_valid FROM "+s.tracesTable()+" WHERE org_id=? AND space_id=? AND trace_id>? GROUP BY trace_id ORDER BY trace_id LIMIT ?", org, space, progress.after, limit)
+		if err != nil {
+			return progress, "", err
+		}
 		for _, row := range rows {
 			id := fmt.Sprint(row["trace_id"])
-			if !readModelTraceID.MatchString(id) {
-				return nil, fmt.Errorf("invalid historical trace_id")
+			if !readModelTraceID.MatchString(id) || id <= progress.after {
+				return progress, "", fmt.Errorf("invalid historical trace_id")
+			}
+			min, minErr := asInt64(row["min_timestamp"])
+			max, maxErr := asInt64(row["max_timestamp"])
+			user, userOK := row["user_id"].(string)
+			product, productOK := row["agent_product"].(string)
+			valid, validOK := row["scope_valid"].(bool)
+			if !validOK {
+				value, err := asInt64(row["scope_valid"])
+				validOK = err == nil && (value == 0 || value == 1)
+				valid = value == 1
+			}
+			if minErr != nil || maxErr != nil || min < 0 || max < min || !userOK || !productOK || !validOK {
+				return progress, "", fmt.Errorf("invalid historical trace summary")
 			}
 			if err := ingest.LockTraceSource(ctx, tx, s.cfg.TablePrefix, org, space, id); err != nil {
-				return nil, err
+				return progress, "", err
 			}
-			// READ COMMITTED after locking the source observes the last ingest
-			// commit; ingest takes this lock before changing any raw spans.
-			query := `UPDATE ` + s.readModelTable("trace_sources") + ` SET source_revision=source_revision+1,dirty=TRUE,
- min_timestamp=(SELECT MIN(timestamp) FROM ` + s.tracesTable() + ` WHERE org_id=? AND space_id=? AND trace_id=?),
- max_timestamp=(SELECT MAX(timestamp) FROM ` + s.tracesTable() + ` WHERE org_id=? AND space_id=? AND trace_id=?),
- user_id=(SELECT MIN(user_id) FROM ` + s.tracesTable() + ` WHERE org_id=? AND space_id=? AND trace_id=?),
- agent_product=(SELECT MIN(agent_product) FROM ` + s.tracesTable() + ` WHERE org_id=? AND space_id=? AND trace_id=?),
- scope_valid=(SELECT COUNT(DISTINCT BINARY user_id)=1 AND MIN(user_id)<>'' AND COUNT(DISTINCT BINARY agent_product)=1 AND MIN(agent_product)<>'' FROM ` + s.tracesTable() + ` WHERE org_id=? AND space_id=? AND trace_id=?)
- WHERE org_id=? AND space_id=? AND trace_id=?`
-			scopeArgs := []any{}
-			for i := 0; i < 6; i++ {
-				scopeArgs = append(scopeArgs, org, space, id)
-			}
-			_, err := tx.ExecContext(ctx, query, scopeArgs...)
+			// Ingest takes this same maintenance fence before every raw write,
+			// including OFF writers. This bounded group page therefore stays
+			// stable until commit; external SQL writers must first suspend the
+			// projection lifecycle. Reuse it instead of five scalar raw scans.
+			query := "UPDATE " + s.readModelTable("trace_sources") + " SET source_revision=source_revision+1,dirty=TRUE,min_timestamp=?,max_timestamp=?,user_id=?,agent_product=?,scope_valid=? WHERE org_id=? AND space_id=? AND trace_id=?"
+			_, err := tx.ExecContext(ctx, query, min, max, user, product, valid, org, space, id)
 			if err != nil {
-				return nil, err
+				return progress, "", err
 			}
-			after = id
-			enrolled++
+			progress.after = id
+			progress.enrolled++
 		}
-		complete = len(rows) < limit
-		if _, err := tx.ExecContext(ctx, "UPDATE "+coverage+" SET after_trace_id=?,complete=? WHERE org_id=? AND space_id=?", after, complete, org, space); err != nil {
-			return nil, err
+		progress.complete = len(rows) < limit
+		if _, err := tx.ExecContext(ctx, "UPDATE "+coverage+" SET after_trace_id=?,complete=? WHERE org_id=? AND space_id=?", progress.after, progress.complete, org, space); err != nil {
+			return progress, "", err
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, err
+		return progress, "", err
 	}
-	return map[string]any{"supported": true, "after_trace_id": after, "complete": complete, "enrolled": enrolled}, nil
+	return progress, "", nil
 }
 
 func readModelWhere(org string, p nativeListParams) (string, []any, error) {

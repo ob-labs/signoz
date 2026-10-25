@@ -74,8 +74,9 @@ func TestProjectionFenceSchemaVersionAndOffLatch(t *testing.T) {
 func TestResumeProjectionMaintenanceRebuildsDerivedOnly(t *testing.T) {
 	db, mock, _ := sqlmock.New()
 	defer db.Close()
-	expectHealthyMaintenanceInitialization(mock)
+	expectMaintenanceControl(mock)
 	expectResumeCleanupLease(mock, 2)
+	expectResumeSchemaRepair(mock)
 	for _, suffix := range []string{"trace_projections", "trace_sources", "trace_projection_coverage"} {
 		expectProjectionCleanupChunk(mock, suffix, 3, 20, false)
 	}
@@ -93,11 +94,15 @@ func TestResumeDoesNotDeleteWhenSchemaRepairFails(t *testing.T) {
 	db, mock, _ := sqlmock.New()
 	defer db.Close()
 	expectMaintenanceControl(mock)
-	mock.ExpectQuery("SELECT schema_version,generation FROM `test_projection_maintenance`").WillReturnRows(sqlmock.NewRows([]string{"schema_version", "generation"}).AddRow(ProjectionSchemaVersion, 1))
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM information_schema.TABLES")).WillReturnError(errors.New("metadata permission denied"))
-	mock.ExpectExec(regexp.QuoteMeta("UPDATE `test_projection_maintenance` SET generation=generation+IF(enabled,1,0),enabled=FALSE,schema_version=0,rebuild_required=TRUE WHERE id=1 AND schema_version=? AND generation=?")).WithArgs(ProjectionSchemaVersion, int64(1)).WillReturnResult(sqlmock.NewResult(0, 1))
-	if err := ResumeProjectionMaintenance(context.Background(), db, "test"); err == nil {
-		t.Fatal("schema inspection failure must stop resume before derived deletes")
+	expectResumeCleanupLease(mock, 2)
+	mock.ExpectQuery("SELECT @@session.ob_query_timeout").WillReturnRows(sqlmock.NewRows([]string{"ob_query_timeout"}).AddRow(10000000))
+	mock.ExpectExec("SET SESSION ob_query_timeout=120000000").WillReturnResult(sqlmock.NewResult(0, 0))
+	repairErr := errors.New("schema repair denied")
+	mock.ExpectExec("CREATE TABLE IF NOT EXISTS `test_trace_sources`").WillReturnError(repairErr)
+	mock.ExpectExec("SET SESSION ob_query_timeout=10000000").WillReturnResult(sqlmock.NewResult(0, 0))
+	expectProjectionCleanupRelease(mock)
+	if err := ResumeProjectionMaintenance(context.Background(), db, "test"); !errors.Is(err, repairErr) {
+		t.Fatalf("schema repair failure must stop before derived deletes: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
@@ -174,8 +179,9 @@ func TestMaintenanceOffSkipsDerivedSchemaAndLatches(t *testing.T) {
 func TestResumeFailurePreservesOffAndCommittedCleanupProgress(t *testing.T) {
 	db, mock, _ := sqlmock.New()
 	defer db.Close()
-	expectHealthyMaintenanceInitialization(mock)
+	expectMaintenanceControl(mock)
 	expectResumeCleanupLease(mock, 2)
+	expectResumeSchemaRepair(mock)
 	expectProjectionCleanupChunk(mock, "trace_projections", 3, 20, false)
 	mock.ExpectBegin()
 	expectProjectionCleanupFence(mock, sqlmock.AnyArg(), 3, false)
@@ -251,6 +257,10 @@ func TestProjectionTokenMigrationRepairsExpressionDrift(t *testing.T) {
 func expectHealthyMaintenanceInitialization(mock sqlmock.Sqlmock) {
 	expectMaintenanceControl(mock)
 	mock.ExpectQuery("SELECT schema_version,generation FROM `test_projection_maintenance`").WillReturnRows(sqlmock.NewRows([]string{"schema_version", "generation"}).AddRow(ProjectionSchemaVersion, 1))
+	expectHealthyProjectionSchema(mock)
+}
+
+func expectHealthyProjectionSchema(mock sqlmock.Sqlmock) {
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM information_schema.TABLES")).WithArgs("test_trace_sources", "test_trace_projections", "test_trace_projection_coverage").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(3))
 	for _, column := range projectionTokenColumns() {
 		mock.ExpectQuery("SELECT COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION").WithArgs("test_trace_projections", column.name).WillReturnRows(sqlmock.NewRows([]string{"COLUMN_TYPE", "EXTRA", "GENERATION_EXPRESSION"}).AddRow(column.kind, "STORED GENERATED", column.expression))
