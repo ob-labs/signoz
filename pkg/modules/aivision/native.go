@@ -12,30 +12,31 @@ import (
 )
 
 type nativeListParams struct {
-	From         int64
-	To           int64
-	User         string
-	SpaceID      string
-	AgentProduct string
-	AgentUUID    string
-	TraceID      string
-	TraceIDs     []string
-	SessionID    string
-	SessionIDs   []string
-	SpanIDs      []string
-	Page         int
-	Limit        int
-	Fields       []string
-	Filters      []nativeFilter
-	OrderBy      string
-	SearchType   string
-	Keyword      string
-	InputKeyword string
-	Tags         []string
-	Env          string
-	Scene        string
-	Username     string
-	IncludeSpans bool
+	ProjectionContext string
+	From              int64
+	To                int64
+	User              string
+	SpaceID           string
+	AgentProduct      string
+	AgentUUID         string
+	TraceID           string
+	TraceIDs          []string
+	SessionID         string
+	SessionIDs        []string
+	SpanIDs           []string
+	Page              int
+	Limit             int
+	Fields            []string
+	Filters           []nativeFilter
+	OrderBy           string
+	SearchType        string
+	Keyword           string
+	InputKeyword      string
+	Tags              []string
+	Env               string
+	Scene             string
+	Username          string
+	IncludeSpans      bool
 }
 
 const nativeSpanProjection = `trace_id,

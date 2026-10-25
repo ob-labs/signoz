@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gorilla/mux"
@@ -30,6 +31,13 @@ import (
 // configured for the query service: the same DSN and table prefix that
 // signoz-ob reads, so write and read share one storage contract.
 type Config struct {
+	// ProjectionMaintenanceDisabled is the single emergency ingest control.
+	// The zero value enables standard revision tracking.
+	ProjectionMaintenanceDisabled bool
+	// ProjectionMaintenanceManaged is internal wiring: the matching data-plane
+	// provider already owns initialization and bounded retry on this DSN/prefix.
+	// Standalone ingest keeps its zero-value bootstrap behavior.
+	ProjectionMaintenanceManaged bool
 	// DSN of the OceanBase/seekdb telemetry database (MySQL protocol).
 	DSN string
 	// TablePrefix of the signoz.* flat tables, e.g. "signoz".
@@ -110,6 +118,11 @@ func AddToRouter(router *mux.Router, cfg Config, logger *slog.Logger) error {
 		_ = db.Close()
 		return err
 	}
+	initCtx, initCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	if err := initializeProjectionMaintenance(initCtx, db, cfg); err != nil {
+		logger.Warn("projection maintenance unavailable; raw ingestion retained with shared eligibility fence", "error", err)
+	}
+	initCancel()
 	ep := &endpoint{
 		cfg:          cfg,
 		db:           db,
@@ -125,6 +138,16 @@ func AddToRouter(router *mux.Router, cfg Config, logger *slog.Logger) error {
 		slog.String("routes", "/v1/traces,/v1/logs,/v1/metrics"),
 		slog.String("table_prefix", cfg.TablePrefix))
 	return nil
+}
+
+// A managed provider is the sole lifecycle owner, including failed migration
+// retries. Repeating its mutating initialization here could revoke eligibility
+// after a successful provider startup without scheduling a new retry.
+func initializeProjectionMaintenance(ctx context.Context, db *sql.DB, cfg Config) error {
+	if cfg.ProjectionMaintenanceManaged {
+		return nil
+	}
+	return InitializeTraceReadModelMaintenance(ctx, db, cfg.TablePrefix, !cfg.ProjectionMaintenanceDisabled)
 }
 
 func (ep *endpoint) authorized(r *http.Request) bool {
@@ -278,6 +301,30 @@ func (ep *endpoint) insertRows(ctx context.Context, table, columns, upsert strin
 		return fmt.Errorf("begin transaction for %s: %w", table, err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	tracking := false
+	if table == ep.tracesTable {
+		enabled, generation, err := LockProjectionMaintenance(ctx, tx, ep.cfg.TablePrefix)
+		if err != nil {
+			return fmt.Errorf("lock projection maintenance before raw write: %w", err)
+		}
+		tracking = enabled && !ep.cfg.ProjectionMaintenanceDisabled
+		if !tracking && generation > 0 {
+			query := "UPDATE " + tableName(ep.cfg.TablePrefix, "projection_maintenance") + " SET enabled=FALSE,rebuild_required=TRUE WHERE id=1"
+			if ep.cfg.ProjectionMaintenanceDisabled {
+				query = "UPDATE " + tableName(ep.cfg.TablePrefix, "projection_maintenance") + " SET generation=generation+IF(enabled,1,0),enabled=FALSE,suspended=TRUE,rebuild_required=TRUE WHERE id=1"
+			}
+			if _, err := tx.ExecContext(ctx, query); err != nil {
+				return err
+			}
+		}
+	}
+	if tracking {
+		for _, key := range traceSourceKeys(rows) {
+			if err := LockTraceSource(ctx, tx, ep.cfg.TablePrefix, key.OrgID, key.SpaceID, key.TraceID); err != nil {
+				return err
+			}
+		}
+	}
 	stmt, err := tx.PrepareContext(ctx, "INSERT INTO "+table+columns+upsert)
 	if err != nil {
 		return fmt.Errorf("prepare upsert for %s: %w", table, err)
@@ -286,6 +333,11 @@ func (ep *endpoint) insertRows(ctx context.Context, table, columns, upsert strin
 	for _, row := range rows {
 		if _, err := stmt.ExecContext(ctx, row...); err != nil {
 			return fmt.Errorf("upsert row into %s: %w", table, err)
+		}
+	}
+	if tracking {
+		if err := ep.dirtyTraceSources(ctx, tx, rows); err != nil {
+			return err
 		}
 	}
 	if err := tx.Commit(); err != nil {

@@ -5,6 +5,7 @@ package aivision
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,15 +41,21 @@ type Module struct {
 }
 
 type oceanBaseStore struct {
-	telemetryStore telemetrystore.TelemetryStore
-	querier        querier.Querier
-	cfg            config
+	db                         *sql.DB
+	sessionTokenGeneratedReady bool
+	telemetryStore             telemetrystore.TelemetryStore
+	querier                    querier.Querier
+	cfg                        config
 }
 
 func NewModule(settings factory.ProviderSettings, store telemetrystore.TelemetryStore, q querier.Querier, cfg telemetrystore.Config) *Module {
+	var db *sql.DB
+	if provider, ok := store.(interface{ SQLDB() *sql.DB }); ok {
+		db = provider.SQLDB()
+	}
 	return &Module{
 		logger: settings.Logger,
-		store: &oceanBaseStore{telemetryStore: store, querier: q, cfg: config{
+		store: &oceanBaseStore{db: db, telemetryStore: store, querier: q, cfg: config{
 			Enabled: cfg.Provider == "oceanbase", TablePrefix: cfg.OceanBase.TablePrefix,
 			MaxLimit: cfg.OceanBase.MaxResultRows, MaxQueryRange: cfg.OceanBase.MaxQueryRange,
 			QueryTimeout: cfg.OceanBase.QueryTimeout,

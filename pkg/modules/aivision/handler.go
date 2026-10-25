@@ -18,6 +18,7 @@ import (
 )
 
 type Handler interface {
+	ReadModel(http.ResponseWriter, *http.Request)
 	Traces(http.ResponseWriter, *http.Request)
 	TracePage(http.ResponseWriter, *http.Request)
 	TraceFacets(http.ResponseWriter, *http.Request)
@@ -686,6 +687,10 @@ func writeJSON(response http.ResponseWriter, status int, payload any) {
 }
 
 func writeAPIError(rw http.ResponseWriter, status int, kind, message string) {
+	if status == http.StatusForbidden {
+		render.Error(rw, errors.NewForbiddenf(errors.CodeForbidden, "%s", message))
+		return
+	}
 	render.Error(rw, errors.NewInvalidInputf(errors.CodeInvalidInput, "%s", message))
 }
 func methodNotAllowed(rw http.ResponseWriter, allowed string) {
