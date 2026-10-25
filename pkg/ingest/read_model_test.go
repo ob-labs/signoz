@@ -32,9 +32,10 @@ func TestTraceRevisionRollsBackWithIngest(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	ep := &endpoint{db: db, cfg: Config{TraceReadModelTracking: true, TablePrefix: "test"}, tracesTable: "`test_traces`"}
+	ep := &endpoint{db: db, cfg: Config{TablePrefix: "test"}, tracesTable: "`test_traces`"}
 	rows := [][]any{{"org", "space", 1, "abc"}, {"org", "space", 2, "abc"}}
 	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT enabled,generation,schema_version FROM `test_projection_maintenance` WHERE id=1 FOR UPDATE").WillReturnRows(sqlmock.NewRows([]string{"enabled", "generation", "schema_version"}).AddRow(true, 1, 1))
 	mock.ExpectExec("INSERT INTO `test_trace_sources`").WithArgs("org", "space", "abc").WillReturnResult(sqlmock.NewResult(0, 1))
 	prepared := mock.ExpectPrepare(regexp.QuoteMeta("INSERT INTO `test_traces` (x) VALUES (?)"))
 	prepared.ExpectExec().WillReturnResult(sqlmock.NewResult(0, 1))
@@ -54,9 +55,10 @@ func TestTraceIngestCoalescesRevisionWithinTransaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	ep := &endpoint{db: db, cfg: Config{TraceReadModelTracking: true, TablePrefix: "test"}, tracesTable: "`test_traces`"}
+	ep := &endpoint{db: db, cfg: Config{TablePrefix: "test"}, tracesTable: "`test_traces`"}
 	rows := [][]any{{"org", "space", 1, "abc"}, {"org", "space", 2, "abc"}}
 	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT enabled,generation,schema_version FROM `test_projection_maintenance` WHERE id=1 FOR UPDATE").WillReturnRows(sqlmock.NewRows([]string{"enabled", "generation", "schema_version"}).AddRow(true, 1, 1))
 	mock.ExpectExec("INSERT INTO `test_trace_sources`").WithArgs("org", "space", "abc").WillReturnResult(sqlmock.NewResult(0, 1))
 	prepared := mock.ExpectPrepare(regexp.QuoteMeta("INSERT INTO `test_traces` (x) VALUES (?)"))
 	prepared.ExpectExec().WillReturnResult(sqlmock.NewResult(0, 1))
@@ -71,14 +73,16 @@ func TestTraceIngestCoalescesRevisionWithinTransaction(t *testing.T) {
 	}
 }
 
-func TestTrackingDisabledRawIngestDoesNotTouchDerivedTables(t *testing.T) {
+func TestTrackingDisabledRawIngestRevokesSharedEligibility(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	ep := &endpoint{db: db, cfg: Config{TablePrefix: "test", TraceReadModelTracking: false}, tracesTable: "`test_traces`"}
+	ep := &endpoint{db: db, cfg: Config{TablePrefix: "test", ProjectionMaintenanceDisabled: true}, tracesTable: "`test_traces`"}
 	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT enabled,generation,schema_version FROM `test_projection_maintenance` WHERE id=1 FOR UPDATE").WillReturnRows(sqlmock.NewRows([]string{"enabled", "generation", "schema_version"}).AddRow(true, 1, 1))
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE `test_projection_maintenance` SET generation=generation+IF(enabled,1,0),enabled=FALSE,suspended=TRUE,rebuild_required=TRUE")).WillReturnResult(sqlmock.NewResult(0, 1))
 	stmt := mock.ExpectPrepare(regexp.QuoteMeta("INSERT INTO `test_traces` (x) VALUES (?)"))
 	stmt.ExpectExec().WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()

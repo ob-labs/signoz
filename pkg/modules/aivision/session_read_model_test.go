@@ -65,8 +65,9 @@ func TestSessionReadModelRequiresHistoricalCoverage(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
 	defer db.Close()
-	s := &oceanBaseStore{db: db, authoritativeIngest: true, cfg: config{TablePrefix: "test"}}
+	s := &oceanBaseStore{db: db, cfg: config{TablePrefix: "test"}}
 	mock.ExpectBegin()
+	expectProjectionMaintenance(mock, true, false)
 	mock.ExpectQuery("SELECT complete FROM").WithArgs("org", "space").WillReturnRows(sqlmock.NewRows([]string{"complete"}))
 	mock.ExpectRollback()
 	result, err := s.sessionReadModelPage(context.Background(), "org", sessionReadModelTestParams())
@@ -79,8 +80,9 @@ func TestSessionReadModelRejectsOversizedGroupWithoutTruncation(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
 	defer db.Close()
-	s := &oceanBaseStore{db: db, authoritativeIngest: true, cfg: config{TablePrefix: "test"}}
+	s := &oceanBaseStore{db: db, cfg: config{TablePrefix: "test"}}
 	mock.ExpectBegin()
+	expectProjectionMaintenance(mock, true, false)
 	mock.ExpectQuery("SELECT complete FROM").WillReturnRows(sqlmock.NewRows([]string{"complete"}).AddRow(true))
 	mock.ExpectQuery("SELECT COALESCE").WillReturnRows(sqlmock.NewRows([]string{"stale", "boundary"}).AddRow(0, 0))
 	mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
@@ -130,14 +132,15 @@ func TestSessionReadModelRejectsPayloadBeforeMaterializingRows(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
 	defer db.Close()
-	s := &oceanBaseStore{db: db, authoritativeIngest: true, cfg: config{TablePrefix: "test"}}
+	s := &oceanBaseStore{db: db, cfg: config{TablePrefix: "test"}}
 	mock.ExpectBegin()
+	expectProjectionMaintenance(mock, true, false)
 	mock.ExpectQuery("SELECT complete FROM").WillReturnRows(sqlmock.NewRows([]string{"complete"}).AddRow(true))
 	mock.ExpectQuery("SELECT COALESCE").WillReturnRows(sqlmock.NewRows([]string{"stale", "boundary"}).AddRow(0, 0))
 	mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectQuery("SELECT session_id,COUNT").WillReturnRows(sqlmock.NewRows([]string{"session_id", "trace_count", "last_activity"}).AddRow("large-session", 1, 123))
-	mock.ExpectQuery("SELECT COALESCE\\(SUM\\(OCTET_LENGTH\\(JSON_OBJECT").WillReturnRows(sqlmock.NewRows([]string{"bytes"}).AddRow(sessionPagePayloadLimit + 1))
+	mock.ExpectQuery("SELECT p\\.session_id,COUNT").WillReturnRows(sqlmock.NewRows([]string{"session_id", "trace_count", "selected_bytes"}).AddRow("large-session", 1, sessionPagePayloadLimit+1))
 	mock.ExpectRollback()
 	result, err := s.sessionReadModelPage(context.Background(), "org", sessionReadModelTestParams())
 	require.NoError(t, err)
@@ -145,8 +148,8 @@ func TestSessionReadModelRejectsPayloadBeforeMaterializingRows(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
-// This exercises the constructor's flag wiring and every group-query consumer.
-// A zero threshold must take the optimized path; nil must retain original SQL.
+// Retired strategy flags cannot disable the standard JSON_TABLE compatibility
+// path. Every group consumer agrees, including a zero threshold; nil skips usage parsing.
 func TestSessionTokenQueryStrategyUsesActualPagePath(t *testing.T) {
 	zero, positive := int64(0), int64(100)
 	for _, tc := range []struct {
@@ -154,9 +157,9 @@ func TestSessionTokenQueryStrategyUsesActualPagePath(t *testing.T) {
 		threshold  *int64
 		optimized  bool
 	}{
-		{"default", "", &zero, false},
-		{"disabled", "false", &zero, false},
-		{"literal_only", "TRUE", &zero, false},
+		{"default", "", &zero, true},
+		{"retired_false_ignored", "false", &zero, true},
+		{"retired_uppercase_ignored", "TRUE", &zero, true},
 		{"enabled_nil", "true", nil, false},
 		{"enabled_zero", "true", &zero, true},
 		{"enabled_positive", "true", &positive, true},
@@ -191,8 +194,12 @@ func TestSessionTokenQueryStrategyUsesActualPagePath(t *testing.T) {
 			p := sessionReadModelTestParams()
 			p.MinTotalTokens = tc.threshold
 			mock.ExpectBegin()
+			expectProjectionMaintenance(mock, true, false)
 			mock.ExpectQuery("SELECT complete FROM").WithArgs("org", "space").WillReturnRows(sqlmock.NewRows([]string{"complete"}).AddRow(true))
 			mock.ExpectQuery("SELECT COALESCE").WillReturnRows(sqlmock.NewRows([]string{"stale", "boundary"}).AddRow(0, 0))
+			if tc.threshold != nil {
+				mock.ExpectQuery("SELECT COLUMN_NAME,COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION").WillReturnRows(sqlmock.NewRows([]string{"COLUMN_NAME", "COLUMN_TYPE", "EXTRA", "GENERATION_EXPRESSION"}))
+			}
 			mock.ExpectQuery("group").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 			mock.ExpectQuery("window").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(4))
 			mock.ExpectQuery("group").WillReturnRows(sqlmock.NewRows([]string{"session_id", "trace_count", "last_activity"}))
@@ -202,7 +209,7 @@ func TestSessionTokenQueryStrategyUsesActualPagePath(t *testing.T) {
 			mock.ExpectCommit()
 			result, err := s.sessionReadModelPage(context.Background(), "org", p)
 			require.NoError(t, err)
-			strategy := "original"
+			strategy := "not_requested"
 			if tc.optimized {
 				strategy = "json_table"
 			}

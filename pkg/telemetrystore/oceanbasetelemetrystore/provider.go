@@ -3,7 +3,6 @@ package oceanbasetelemetrystore
 import (
 	"context"
 	"database/sql"
-	"os"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
@@ -16,9 +15,10 @@ import (
 )
 
 type provider struct {
-	db     *sql.DB
-	config telemetrystore.OceanBaseConfig
-	hooks  []telemetrystore.TelemetryStoreHook
+	db                *sql.DB
+	config            telemetrystore.OceanBaseConfig
+	hooks             []telemetrystore.TelemetryStoreHook
+	maintenanceCancel context.CancelFunc
 }
 
 var _ telemetrystore.TelemetryStore = (*provider)(nil)
@@ -67,16 +67,29 @@ func New(ctx context.Context, settings factory.ProviderSettings, config telemetr
 		db.Close()
 		return nil, errors.WrapInternalf(err, errors.CodeInternal, "connect to OceanBase telemetry store")
 	}
-	if os.Getenv("SIGNOZ_AIVISION_TRACE_READ_MODEL_TRACKING_ENABLED") == "true" {
-		initCtx, initCancel := context.WithTimeout(ctx, config.OceanBase.QueryTimeout)
-		err := ingest.InitializeTraceReadModelTracking(initCtx, db, config.OceanBase.TablePrefix)
-		initCancel()
-		if err != nil {
-			db.Close()
-			return nil, errors.WrapInternalf(err, errors.CodeInternal, "initialize trace read-model tracking")
-		}
+	// Projection migration is bounded independently from short query deadlines.
+	// A derived-schema failure must not stop the raw telemetry service. The
+	// durable migration fence remains ineligible until retry finishes.
+	initCtx, initCancel := context.WithTimeout(ctx, 2*time.Minute)
+	err = ingest.InitializeTraceReadModelMaintenance(initCtx, db, config.OceanBase.TablePrefix, ingest.ProjectionMaintenanceEnabled())
+	initCancel()
+	if err != nil && settings.Logger != nil {
+		settings.Logger.Warn("projection maintenance initialization failed; raw queries remain available", "error", err)
 	}
-	return &provider{db: db, config: config.OceanBase, hooks: hooks}, nil
+
+	result := &provider{db: db, config: config.OceanBase, hooks: hooks}
+	if err != nil {
+		retryCtx, retryCancel := context.WithCancel(ctx)
+		result.maintenanceCancel = retryCancel
+		go retryProjectionMaintenance(retryCtx, 5*time.Second, func(attemptCtx context.Context) error {
+			attemptErr := ingest.InitializeTraceReadModelMaintenance(attemptCtx, db, config.OceanBase.TablePrefix, ingest.ProjectionMaintenanceEnabled())
+			if attemptErr != nil && settings.Logger != nil {
+				settings.Logger.Warn("retry projection maintenance initialization", "error", attemptErr)
+			}
+			return attemptErr
+		})
+	}
+	return result, nil
 }
 
 func (p *provider) QueryContext(ctx context.Context, query string, args ...any) (telemetrystore.Rows, error) {
@@ -103,7 +116,12 @@ func (p *provider) QueryContext(ctx context.Context, query string, args ...any) 
 	return result, nil
 }
 
-func (p *provider) Close() error                   { return p.db.Close() }
+func (p *provider) Close() error {
+	if p.maintenanceCancel != nil {
+		p.maintenanceCancel()
+	}
+	return p.db.Close()
+}
 func (p *provider) Ping(ctx context.Context) error { return p.db.PingContext(ctx) }
 func (p *provider) ClickhouseDB() clickhouse.Conn  { return telemetrystore.UnsupportedClickHouse{} }
 func (p *provider) Cluster() string                { return "" }
@@ -126,3 +144,29 @@ func (p *provider) Indexes(context.Context, string, ...any) (telemetrystoretypes
 
 // SQLDB shares the existing pool with domain operations requiring a transaction.
 func (p *provider) SQLDB() *sql.DB { return p.db }
+
+// Retry transient migration failures without taking the raw service offline.
+// Shutdown cancels both a pending delay and an active bounded attempt.
+func retryProjectionMaintenance(ctx context.Context, interval time.Duration, initialize func(context.Context) error) {
+	timer := time.NewTicker(interval)
+	defer timer.Stop()
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		attemptCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		err := initialize(attemptCtx)
+		cancel()
+		if err == nil {
+			return
+		}
+	}
+}

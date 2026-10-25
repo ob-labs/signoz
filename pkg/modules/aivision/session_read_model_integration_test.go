@@ -29,14 +29,14 @@ func TestOceanBaseCanonicalSessionReadModel(t *testing.T) {
 	ctx := context.Background()
 	prefix := "session_" + strings.ReplaceAll(valuer.GenerateUUID().StringValue(), "-", "")[:12]
 	org := valuer.GenerateUUID().StringValue()
-	require.NoError(t, ingest.AddToRouter(mux.NewRouter(), ingest.Config{TraceReadModelTracking: true, DSN: dsn, TablePrefix: prefix, OrgID: org, InternalKey: "isolated-session-test"}, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	require.NoError(t, ingest.AddToRouter(mux.NewRouter(), ingest.Config{DSN: dsn, TablePrefix: prefix, OrgID: org, InternalKey: "isolated-session-test"}, slog.New(slog.NewTextHandler(io.Discard, nil))))
 	t.Cleanup(func() {
-		for _, suffix := range []string{"traces", "logs", "metric_samples", "trace_sources", "trace_projections", "trace_projection_coverage"} {
+		for _, suffix := range []string{"traces", "logs", "metric_samples", "trace_sources", "trace_projections", "trace_projection_coverage", "projection_maintenance"} {
 			_, e := db.Exec("DROP TABLE IF EXISTS `" + prefix + "_" + suffix + "`")
 			require.NoError(t, e)
 		}
 	})
-	store := &oceanBaseStore{db: db, readModelEnabled: true, authoritativeIngest: true, cfg: config{TablePrefix: prefix}}
+	store := &oceanBaseStore{db: db, cfg: config{TablePrefix: prefix}}
 	start := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
 	fixture := tracePageIntegrationFixture{db: db, table: store.tracesTable(), org: org, start: start}
 	spans := []tracePageIntegrationSpan{}
@@ -104,45 +104,25 @@ func TestOceanBaseCanonicalSessionReadModel(t *testing.T) {
 			_, e := db.Exec("UPDATE "+store.readModelTable("trace_sources")+" SET user_id=? WHERE org_id=? AND space_id='scope' AND trace_id=?", physical, org, trace)
 			require.NoError(t, e)
 		}
-		projection := traceProjection{ProjectionContext: contextHash, SpaceID: "scope", TraceID: trace, SourceRevision: 1, SemanticsVersion: 1, AgentUUID: "agent", AgentProduct: "Codex", UserID: physical, Period: startNS / 1000000, Duration: &duration, Status: status, NodeCount: 2, Environment: &env, Username: &user, SessionID: sid, Tags: []string{tag}, SceneValues: []string{}, InputText: fmt.Sprintf("needle %%_中文 turn-%d ", i) + strings.ToLower(fullInput), OutputText: "answer", Row: row, Preview: validProjection().Preview}
+		projection := traceProjection{MaintenanceGeneration: integrationProjectionGeneration(t, db, prefix), ProjectionContext: contextHash, SpaceID: "scope", TraceID: trace, SourceRevision: 1, SemanticsVersion: 1, AgentUUID: "agent", AgentProduct: "Codex", UserID: physical, Period: startNS / 1000000, Duration: &duration, Status: status, NodeCount: 2, Environment: &env, Username: &user, SessionID: sid, Tags: []string{tag}, SceneValues: []string{}, InputText: fmt.Sprintf("needle %%_中文 turn-%d ", i) + strings.ToLower(fullInput), OutputText: "answer", Row: row, Preview: validProjection().Preview}
 		result, e := store.publishTraceProjection(ctx, org, projection)
 		require.NoError(t, e)
 		require.Equal(t, true, result.(map[string]any)["published"])
 	}
 	p := sessionReadModelParams{nativeListParams: nativeListParams{ProjectionContext: contextHash, From: start.UnixMilli(), To: start.Add(time.Minute).UnixMilli(), SpaceID: "scope", User: "subject", AgentProduct: "Codex", AgentUUID: "agent", Page: 1, Limit: 20}}
 	get := func(p sessionReadModelParams) map[string]any {
-		store.sessionPageBatchEnabled = false
-		store.sessionTokenQueryOptimized = false
-		original, e := store.sessionReadModelPage(ctx, org, p)
+		response, e := store.sessionReadModelPage(ctx, org, p)
 		require.NoError(t, e)
-		store.sessionTokenQueryOptimized = true
-		optimized, e := store.sessionReadModelPage(ctx, org, p)
-		require.NoError(t, e)
-		before, after := original.(map[string]any), optimized.(map[string]any)
-		require.Equal(t, true, after["supported"])
-		beforeMeta, afterMeta := before["meta"].(map[string]any), after["meta"].(map[string]any)
-		require.Equal(t, "original", beforeMeta["sessionTokenQueryStrategy"])
-		strategy := "original"
+		result := response.(map[string]any)
+		require.Equal(t, true, result["supported"])
+		meta := result["meta"].(map[string]any)
+		require.Equal(t, "batch", meta["sessionPageSummaryStrategy"])
+		strategy := "not_requested"
 		if p.MinTotalTokens != nil {
-			strategy = "json_table"
+			strategy = "generated_columns"
 		}
-		require.Equal(t, strategy, afterMeta["sessionTokenQueryStrategy"])
-		delete(beforeMeta, "sessionTokenQueryStrategy")
-		delete(afterMeta, "sessionTokenQueryStrategy")
-		require.Equal(t, before, after, "same fixture must preserve full response, facets and all other metadata")
-		store.sessionPageBatchEnabled = true
-		batched, e := store.sessionReadModelPage(ctx, org, p)
-		require.NoError(t, e)
-		batch := batched.(map[string]any)
-		batchMeta := batch["meta"].(map[string]any)
-		require.Equal(t, "individual", afterMeta["sessionPageSummaryStrategy"])
-		require.Equal(t, "batch", batchMeta["sessionPageSummaryStrategy"])
-		delete(batchMeta, "sessionTokenQueryStrategy")
-		delete(batchMeta, "sessionPageSummaryStrategy")
-		delete(afterMeta, "sessionPageSummaryStrategy")
-		require.Equal(t, after, batch, "batched summaries preserve complete canonical data, matched turns, facets, ordering and pagination")
-		store.sessionPageBatchEnabled = false
-		return after
+		require.Equal(t, strategy, meta["sessionTokenQueryStrategy"])
+		return result
 	}
 	result := get(p)
 	require.Equal(t, 4, result["meta"].(map[string]any)["totalItems"])

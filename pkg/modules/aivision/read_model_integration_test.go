@@ -37,14 +37,14 @@ func TestOceanBaseTraceReadModel(t *testing.T) {
 	router := mux.NewRouter()
 	org := valuer.GenerateUUID().StringValue()
 	key := "isolated-test-key"
-	require.NoError(t, ingest.AddToRouter(router, ingest.Config{TraceReadModelTracking: true, DSN: dsn, TablePrefix: prefix, OrgID: org, InternalKey: key}, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	require.NoError(t, ingest.AddToRouter(router, ingest.Config{DSN: dsn, TablePrefix: prefix, OrgID: org, InternalKey: key}, slog.New(slog.NewTextHandler(io.Discard, nil))))
 	t.Cleanup(func() {
-		for _, suffix := range []string{"traces", "logs", "metric_samples", "trace_sources", "trace_projections", "trace_projection_coverage"} {
+		for _, suffix := range []string{"traces", "logs", "metric_samples", "trace_sources", "trace_projections", "trace_projection_coverage", "projection_maintenance"} {
 			_, err := db.Exec("DROP TABLE IF EXISTS `" + prefix + "_" + suffix + "`")
 			require.NoError(t, err)
 		}
 	})
-	store := &oceanBaseStore{db: db, readModelEnabled: true, authoritativeIngest: true, cfg: config{TablePrefix: prefix}}
+	store := &oceanBaseStore{db: db, cfg: config{TablePrefix: prefix}}
 	start := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
 	fixture := tracePageIntegrationFixture{db: db, table: store.tracesTable(), org: org, start: start}
 	spans := []tracePageIntegrationSpan{}
@@ -84,7 +84,7 @@ func TestOceanBaseTraceReadModel(t *testing.T) {
 			username = "sdk-user"
 			user = &username
 		}
-		p := traceProjection{ProjectionContext: contextHash, SpaceID: "scope", TraceID: trace, SourceRevision: 1, SemanticsVersion: 1, AgentUUID: "agent", AgentProduct: "Codex", UserID: "subject", Period: start.UnixMilli(), Duration: &duration, Status: 1, NodeCount: 2, Environment: &env, Username: user, SceneValues: []string{"dev", "dev", "eval"}, Tags: []string{[]string{"", "alpha", "beta", "gamma"}[i]}, InputText: fmt.Sprintf("i\u0307_%% literal trace-%d", i), OutputText: "answer", Row: row, Preview: validProjection().Preview}
+		p := traceProjection{MaintenanceGeneration: integrationProjectionGeneration(t, db, prefix), ProjectionContext: contextHash, SpaceID: "scope", TraceID: trace, SourceRevision: 1, SemanticsVersion: 1, AgentUUID: "agent", AgentProduct: "Codex", UserID: "subject", Period: start.UnixMilli(), Duration: &duration, Status: 1, NodeCount: 2, Environment: &env, Username: user, SceneValues: []string{"dev", "dev", "eval"}, Tags: []string{[]string{"", "alpha", "beta", "gamma"}[i]}, InputText: fmt.Sprintf("i\u0307_%% literal trace-%d", i), OutputText: "answer", Row: row, Preview: validProjection().Preview}
 		require.NoError(t, validateTraceProjection(p))
 		published, err := store.publishTraceProjection(ctx, org, p)
 		require.NoError(t, err)
@@ -223,11 +223,10 @@ func TestOceanBaseTraceReadModel(t *testing.T) {
 	var indexed int64
 	require.NoError(t, db.QueryRow("SELECT MIN(timestamp) FROM "+store.tracesTable()+" WHERE org_id=? AND space_id='scope' AND trace_id=?", org, trace).Scan(&indexed))
 	require.Equal(t, newStart, indexed)
-	// Telemetry-store activation invalidates coverage even with no ingest key.
-	// Backfill must then refresh existing revisions before read eligibility.
+	// Ordinary restarts preserve trustworthy coverage and existing dirty revisions.
 	initializeTelemetryStore := func(tracking string) {
 		t.Helper()
-		t.Setenv("SIGNOZ_AIVISION_TRACE_READ_MODEL_TRACKING_ENABLED", tracking)
+		t.Setenv("SIGNOZ_AIVISION_PROJECTION_MAINTENANCE_ENABLED", tracking)
 		t.Setenv("SIGNOZ_INGEST_INTERNAL_KEY", "")
 		cfg := telemetrystore.NewConfigFactory().New().(telemetrystore.Config)
 		cfg.Provider = "oceanbase"
@@ -239,15 +238,15 @@ func TestOceanBaseTraceReadModel(t *testing.T) {
 	}
 	initializeTelemetryStore("true")
 	reactivated := mux.NewRouter()
-	cfg := ingest.Config{TraceReadModelTracking: true, DSN: dsn, TablePrefix: prefix, OrgID: org, InternalKey: ""}
+	cfg := ingest.Config{DSN: dsn, TablePrefix: prefix, OrgID: org, InternalKey: ""}
 	require.NoError(t, ingest.AddToRouter(reactivated, cfg, slog.New(slog.NewTextHandler(io.Discard, nil))))
 	page, err = store.readModelPage(ctx, org, params)
 	require.NoError(t, err)
-	require.Equal(t, readModelUnsupported("historical_coverage_incomplete"), page)
+	require.Equal(t, readModelUnsupported("boundary_crossing_trace"), page)
 	_, err = store.backfillTraceSources(ctx, org, "scope", 10)
 	require.NoError(t, err)
 	require.NoError(t, db.QueryRow("SELECT source_revision FROM "+store.readModelTable("trace_sources")+" WHERE org_id=? AND space_id='scope' AND trace_id=?", org, trace).Scan(&revision))
-	require.EqualValues(t, 3, revision)
+	require.EqualValues(t, 2, revision)
 	// Full rollback remains functional even if every derived table is absent.
 	for _, suffix := range []string{"trace_sources", "trace_projections", "trace_projection_coverage"} {
 		_, err := db.Exec("DROP TABLE " + store.readModelTable(suffix))
@@ -259,7 +258,7 @@ func TestOceanBaseTraceReadModel(t *testing.T) {
 	require.Zero(t, derivedTables, "tracking-disabled provider startup must not recreate derived schema")
 	legacy := mux.NewRouter()
 	cfg.InternalKey = key
-	cfg.TraceReadModelTracking = false
+	cfg.ProjectionMaintenanceDisabled = true
 	require.NoError(t, ingest.AddToRouter(legacy, cfg, slog.New(slog.NewTextHandler(io.Discard, nil))))
 	rollbackRequest := httptest.NewRequest(http.MethodPost, "/v1/traces", strings.NewReader(body))
 	rollbackRequest.Header.Set("Content-Type", "application/json")
@@ -267,11 +266,16 @@ func TestOceanBaseTraceReadModel(t *testing.T) {
 	rollbackRecorder := httptest.NewRecorder()
 	legacy.ServeHTTP(rollbackRecorder, rollbackRequest)
 	require.Equal(t, 200, rollbackRecorder.Code, rollbackRecorder.Body.String())
-	// A later activation must bootstrap from scratch after untracked writes.
-	cfg.TraceReadModelTracking = true
+	// Default-on replicas cannot undo the fleet-wide OFF latch.
+	cfg.ProjectionMaintenanceDisabled = false
 	cfg.InternalKey = ""
 	initializeTelemetryStore("true")
 	require.NoError(t, ingest.AddToRouter(mux.NewRouter(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	page, err = store.readModelPage(ctx, org, params)
+	require.NoError(t, err)
+	require.Equal(t, readModelUnsupported("projection_maintenance_unavailable"), page)
+	// Explicit resume invalidates only derived rows and enrolls history afresh.
+	require.NoError(t, ingest.ResumeProjectionMaintenance(ctx, db, prefix))
 	page, err = store.readModelPage(ctx, org, params)
 	require.NoError(t, err)
 	require.Equal(t, readModelUnsupported("historical_coverage_incomplete"), page)
@@ -291,14 +295,14 @@ func TestOceanBaseTraceReadModelScopeRetag(t *testing.T) {
 	org := valuer.GenerateUUID().StringValue()
 	key := "isolated-retag-key"
 	router := mux.NewRouter()
-	require.NoError(t, ingest.AddToRouter(router, ingest.Config{TraceReadModelTracking: true, DSN: dsn, TablePrefix: prefix, OrgID: org, InternalKey: key}, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	require.NoError(t, ingest.AddToRouter(router, ingest.Config{DSN: dsn, TablePrefix: prefix, OrgID: org, InternalKey: key}, slog.New(slog.NewTextHandler(io.Discard, nil))))
 	t.Cleanup(func() {
-		for _, suffix := range []string{"traces", "logs", "metric_samples", "trace_sources", "trace_projections", "trace_projection_coverage"} {
+		for _, suffix := range []string{"traces", "logs", "metric_samples", "trace_sources", "trace_projections", "trace_projection_coverage", "projection_maintenance"} {
 			_, err := db.Exec("DROP TABLE IF EXISTS `" + prefix + "_" + suffix + "`")
 			require.NoError(t, err)
 		}
 	})
-	store := &oceanBaseStore{db: db, readModelEnabled: true, authoritativeIngest: true, cfg: config{TablePrefix: prefix}}
+	store := &oceanBaseStore{db: db, cfg: config{TablePrefix: prefix}}
 	start := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
 	fixture := tracePageIntegrationFixture{db: db, table: store.tracesTable(), org: org, start: start}
 	contextHash := strings.Repeat("a", 64)
@@ -310,7 +314,7 @@ func TestOceanBaseTraceReadModelScopeRetag(t *testing.T) {
 			_, err := store.backfillTraceSources(ctx, org, scope, 10)
 			require.NoError(t, err)
 			row, _ := json.Marshal(map[string]any{"trace_id": root.traceID, "start_time_unix_nano": fmt.Sprint(start.UnixNano()), "status_code": 1, "span_count": 2})
-			p := traceProjection{ProjectionContext: contextHash, SpaceID: scope, TraceID: root.traceID, SourceRevision: 1, SemanticsVersion: 1, AgentUUID: "agent", AgentProduct: "Codex", UserID: "subject", Period: start.UnixMilli(), Status: 1, NodeCount: 2, Row: row, Preview: validProjection().Preview}
+			p := traceProjection{MaintenanceGeneration: integrationProjectionGeneration(t, db, prefix), ProjectionContext: contextHash, SpaceID: scope, TraceID: root.traceID, SourceRevision: 1, SemanticsVersion: 1, AgentUUID: "agent", AgentProduct: "Codex", UserID: "subject", Period: start.UnixMilli(), Status: 1, NodeCount: 2, Row: row, Preview: validProjection().Preview}
 			require.NoError(t, validateTraceProjection(p))
 			published, err := store.publishTraceProjection(ctx, org, p)
 			require.NoError(t, err)

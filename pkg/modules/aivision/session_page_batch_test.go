@@ -15,14 +15,9 @@ import (
 
 // A middle-turn SDK/content match must retain every scoped turn; exact Session
 // IDs differing only by padding/case must remain separate, in page order.
-func TestSessionPageBatchPreservesIndividualResult(t *testing.T) {
-	individual := sessionPageBatchResult(t, "", false)
-	batch := sessionPageBatchResult(t, "true", true)
-	require.Equal(t, "individual", individual["meta"].(map[string]any)["sessionPageSummaryStrategy"])
+func TestStandardSessionBatchPreservesExactGroupsAndUsage(t *testing.T) {
+	batch := sessionPageBatchResult(t, "", true)
 	require.Equal(t, "batch", batch["meta"].(map[string]any)["sessionPageSummaryStrategy"])
-	delete(individual["meta"].(map[string]any), "sessionPageSummaryStrategy")
-	delete(batch["meta"].(map[string]any), "sessionPageSummaryStrategy")
-	require.Equal(t, individual, batch)
 	data := batch["data"].([]map[string]any)
 	require.Equal(t, []string{" s ", "s", "S"}, []string{data[0]["session_id"].(string), data[1]["session_id"].(string), data[2]["session_id"].(string)})
 	require.Equal(t, int64(2), data[0]["traceCount"])
@@ -38,22 +33,10 @@ func sessionPageBatchResult(t *testing.T, flag string, batch bool) map[string]an
 	p.Username, p.Keyword, p.SearchType = " user ", " needle ", "input"
 	groups := sqlmock.NewRows([]string{"session_id", "trace_count", "last_activity"}).AddRow(" s ", 2, 150).AddRow("s", 1, 140).AddRow("S", 1, 130)
 	sessionPageBatchExpectPage(mock, groups, 3)
-	if batch {
-		mock.ExpectQuery(`SELECT p\.session_id,COUNT\(\*\) AS trace_count,COALESCE\(SUM\(OCTET_LENGTH\(JSON_OBJECT`).WithArgs(sessionPageBatchScopeArgs(" s ", "s", "S")...).WillReturnRows(sqlmock.NewRows([]string{"session_id", "trace_count", "selected_bytes"}).AddRow("S", 1, 300).AddRow("s", 1, 300).AddRow(" s ", 2, 600))
-		args := append([]driver.Value{" user ", " needle "}, sessionPageBatchScopeArgs(" s ", "s", "S")...)
-		args = append(args, sessionPageTraceLimit+1)
-		mock.ExpectQuery(`SELECT p\.session_id AS session_id,p\.trace_id AS trace_id,JSON_OBJECT`).WithArgs(args...).WillReturnRows(sessionPageBatchTraceRows(true, []string{" s ", " s ", "S", "s"}, []string{"01", "02", "04", "03"}))
-	} else {
-		for i, sid := range []string{" s ", "s", "S"} {
-			mock.ExpectQuery(`SELECT COALESCE\(SUM\(OCTET_LENGTH\(JSON_OBJECT`).WillReturnRows(sqlmock.NewRows([]string{"bytes"}).AddRow(600))
-			ids := [][]string{{"01", "02"}, {"03"}, {"04"}}[i]
-			sids := make([]string, len(ids))
-			for j := range sids {
-				sids[j] = sid
-			}
-			mock.ExpectQuery(`SELECT JSON_OBJECT`).WillReturnRows(sessionPageBatchTraceRows(false, sids, ids))
-		}
-	}
+	mock.ExpectQuery(`SELECT p\.session_id,COUNT\(\*\) AS trace_count,COALESCE\(SUM\(OCTET_LENGTH\(JSON_OBJECT`).WithArgs(sessionPageBatchScopeArgs(" s ", "s", "S")...).WillReturnRows(sqlmock.NewRows([]string{"session_id", "trace_count", "selected_bytes"}).AddRow("S", 1, 300).AddRow("s", 1, 300).AddRow(" s ", 2, 600))
+	args := append([]driver.Value{" user ", " needle "}, sessionPageBatchScopeArgs(" s ", "s", "S")...)
+	args = append(args, sessionPageTraceLimit+1)
+	mock.ExpectQuery(`SELECT p\.session_id AS session_id,p\.trace_id AS trace_id,JSON_OBJECT`).WithArgs(args...).WillReturnRows(sessionPageBatchTraceRows(true, []string{" s ", " s ", "S", "s"}, []string{"01", "02", "04", "03"}))
 	sessionPageBatchExpectFacets(mock)
 	mock.ExpectCommit()
 	result, err := s.sessionReadModelPage(context.Background(), "org", p)
@@ -76,6 +59,7 @@ func sessionPageBatchStore(t *testing.T, flag string) (*oceanBaseStore, sqlmock.
 
 func sessionPageBatchExpectPage(mock sqlmock.Sqlmock, groups *sqlmock.Rows, total int) {
 	mock.ExpectBegin()
+	expectProjectionMaintenance(mock, true, false)
 	mock.ExpectQuery("SELECT complete FROM").WithArgs("org", "space").WillReturnRows(sqlmock.NewRows([]string{"complete"}).AddRow(true))
 	mock.ExpectQuery("SELECT COALESCE").WillReturnRows(sqlmock.NewRows([]string{"stale", "boundary"}).AddRow(0, 0))
 	mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(total))
@@ -205,7 +189,7 @@ func TestSessionPageBatchEmptyPageSkipsSummaryReads(t *testing.T) {
 			result, err := s.sessionReadModelPage(context.Background(), "org", sessionReadModelTestParams())
 			require.NoError(t, err)
 			require.Empty(t, result.(map[string]any)["data"])
-			strategy := "individual"
+			strategy := "batch"
 			if flag == "true" {
 				strategy = "batch"
 			}

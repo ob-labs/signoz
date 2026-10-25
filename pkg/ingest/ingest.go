@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gorilla/mux"
@@ -30,7 +31,9 @@ import (
 // configured for the query service: the same DSN and table prefix that
 // signoz-ob reads, so write and read share one storage contract.
 type Config struct {
-	TraceReadModelTracking bool
+	// ProjectionMaintenanceDisabled is the single emergency ingest control.
+	// The zero value enables standard revision tracking.
+	ProjectionMaintenanceDisabled bool
 	// DSN of the OceanBase/seekdb telemetry database (MySQL protocol).
 	DSN string
 	// TablePrefix of the signoz.* flat tables, e.g. "signoz".
@@ -111,12 +114,11 @@ func AddToRouter(router *mux.Router, cfg Config, logger *slog.Logger) error {
 		_ = db.Close()
 		return err
 	}
-	if cfg.TraceReadModelTracking {
-		if err := EnsureTraceReadModelSchema(context.Background(), db, cfg.TablePrefix); err != nil {
-			db.Close()
-			return err
-		}
+	initCtx, initCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	if err := InitializeTraceReadModelMaintenance(initCtx, db, cfg.TablePrefix, !cfg.ProjectionMaintenanceDisabled); err != nil {
+		logger.Warn("projection maintenance unavailable; raw ingestion retained with shared eligibility fence", "error", err)
 	}
+	initCancel()
 	ep := &endpoint{
 		cfg:          cfg,
 		db:           db,
@@ -285,7 +287,24 @@ func (ep *endpoint) insertRows(ctx context.Context, table, columns, upsert strin
 		return fmt.Errorf("begin transaction for %s: %w", table, err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if ep.cfg.TraceReadModelTracking && table == ep.tracesTable {
+	tracking := false
+	if table == ep.tracesTable {
+		enabled, generation, err := LockProjectionMaintenance(ctx, tx, ep.cfg.TablePrefix)
+		if err != nil {
+			return fmt.Errorf("lock projection maintenance before raw write: %w", err)
+		}
+		tracking = enabled && !ep.cfg.ProjectionMaintenanceDisabled
+		if !tracking && generation > 0 {
+			query := "UPDATE " + tableName(ep.cfg.TablePrefix, "projection_maintenance") + " SET enabled=FALSE,rebuild_required=TRUE WHERE id=1"
+			if ep.cfg.ProjectionMaintenanceDisabled {
+				query = "UPDATE " + tableName(ep.cfg.TablePrefix, "projection_maintenance") + " SET generation=generation+IF(enabled,1,0),enabled=FALSE,suspended=TRUE,rebuild_required=TRUE WHERE id=1"
+			}
+			if _, err := tx.ExecContext(ctx, query); err != nil {
+				return err
+			}
+		}
+	}
+	if tracking {
 		for _, key := range traceSourceKeys(rows) {
 			if err := LockTraceSource(ctx, tx, ep.cfg.TablePrefix, key.OrgID, key.SpaceID, key.TraceID); err != nil {
 				return err
@@ -302,7 +321,7 @@ func (ep *endpoint) insertRows(ctx context.Context, table, columns, upsert strin
 			return fmt.Errorf("upsert row into %s: %w", table, err)
 		}
 	}
-	if ep.cfg.TraceReadModelTracking && table == ep.tracesTable {
+	if tracking {
 		if err := ep.dirtyTraceSources(ctx, tx, rows); err != nil {
 			return err
 		}

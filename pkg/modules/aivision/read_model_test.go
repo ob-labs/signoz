@@ -10,7 +10,7 @@ import (
 )
 
 func validProjection() traceProjection {
-	return traceProjection{ProjectionContext: strings.Repeat("a", 64), SpaceID: "s", TraceID: "0123456789abcdef0123456789abcdef", SourceRevision: 1, SemanticsVersion: 1, AgentUUID: "a", Period: 100, Duration: nil, NodeCount: 1, Row: json.RawMessage(`{"trace_id":"0123456789abcdef0123456789abcdef","start_time_unix_nano":"100000000"}`), Preview: json.RawMessage(`{"version":"native-trace-preview-v1","complete":true,"input":"ok","output":"yes","inputTruncated":false,"outputTruncated":false,"rootObservationId":"root"}`)}
+	return traceProjection{MaintenanceGeneration: 1, ProjectionContext: strings.Repeat("a", 64), SpaceID: "s", TraceID: "0123456789abcdef0123456789abcdef", SourceRevision: 1, SemanticsVersion: 1, AgentUUID: "a", Period: 100, Duration: nil, NodeCount: 1, Row: json.RawMessage(`{"trace_id":"0123456789abcdef0123456789abcdef","start_time_unix_nano":"100000000"}`), Preview: json.RawMessage(`{"version":"native-trace-preview-v1","complete":true,"input":"ok","output":"yes","inputTruncated":false,"outputTruncated":false,"rootObservationId":"root"}`)}
 }
 func TestProjectionRejectsMalformedAndUnsupportedContracts(t *testing.T) {
 	p := validProjection()
@@ -46,6 +46,7 @@ func TestPublishCompareAndSwapRejectsOldRevision(t *testing.T) {
 	p.UserID = "owner"
 	p.AgentProduct = "product"
 	mock.ExpectBegin()
+	expectProjectionMaintenance(mock, true, true)
 	mock.ExpectQuery("SELECT source_revision,user_id,agent_product,scope_valid").WithArgs("org", p.SpaceID, p.TraceID).WillReturnRows(sqlmock.NewRows([]string{"source_revision", "user_id", "agent_product", "scope_valid"}).AddRow(2, "owner", "product", true))
 	mock.ExpectRollback()
 	result, err := s.publishTraceProjection(context.Background(), "org", p)
@@ -61,6 +62,7 @@ func TestPublishCannotChangePhysicalAuthorizationScope(t *testing.T) {
 	p := validProjection()
 	p.UserID = "attacker"
 	mock.ExpectBegin()
+	expectProjectionMaintenance(mock, true, true)
 	mock.ExpectQuery("SELECT source_revision,user_id,agent_product,scope_valid").WithArgs("org", p.SpaceID, p.TraceID).WillReturnRows(sqlmock.NewRows([]string{"source_revision", "user_id", "agent_product", "scope_valid"}).AddRow(1, "owner", "product", true))
 	mock.ExpectRollback()
 	result, err := s.publishTraceProjection(context.Background(), "org", p)
@@ -72,8 +74,9 @@ func TestPageRequiresCompleteHistoricalCoverageBeforeEmptySuccess(t *testing.T) 
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
 	defer db.Close()
-	s := &oceanBaseStore{db: db, authoritativeIngest: true, cfg: config{TablePrefix: "test"}}
+	s := &oceanBaseStore{db: db, cfg: config{TablePrefix: "test"}}
 	mock.ExpectBegin()
+	expectProjectionMaintenance(mock, true, false)
 	mock.ExpectQuery("SELECT complete FROM").WithArgs("org", "s").WillReturnRows(sqlmock.NewRows([]string{"complete"}))
 	mock.ExpectRollback()
 	p := nativeListParams{ProjectionContext: strings.Repeat("a", 64), SpaceID: "s", AgentUUID: "agent", From: 1, To: 2, Page: 1, Limit: 10}
@@ -91,8 +94,9 @@ func TestPageRejectsStaleAndBoundarySources(t *testing.T) {
 			db, mock, err := sqlmock.New()
 			require.NoError(t, err)
 			defer db.Close()
-			s := &oceanBaseStore{db: db, authoritativeIngest: true, cfg: config{TablePrefix: "test"}}
+			s := &oceanBaseStore{db: db, cfg: config{TablePrefix: "test"}}
 			mock.ExpectBegin()
+			expectProjectionMaintenance(mock, true, false)
 			mock.ExpectQuery("SELECT complete FROM").WithArgs("org", "s").WillReturnRows(sqlmock.NewRows([]string{"complete"}).AddRow(true))
 			mock.ExpectQuery("SELECT COALESCE\\(SUM").WillReturnRows(sqlmock.NewRows([]string{"stale", "boundary"}).AddRow(tc.stale, tc.boundary))
 			mock.ExpectRollback()
@@ -109,8 +113,9 @@ func TestSourceSnapshotCountAndSpansUseOneTransaction(t *testing.T) {
 	defer db.Close()
 	s := &oceanBaseStore{db: db, cfg: config{TablePrefix: "test"}}
 	mock.ExpectBegin()
+	expectProjectionMaintenance(mock, true, false)
 	mock.ExpectQuery("SELECT source_revision,min_timestamp,max_timestamp,user_id,agent_product,scope_valid").WithArgs("org", "space", "abc").WillReturnRows(sqlmock.NewRows([]string{"revision", "min", "max", "user_id", "product", "valid"}).AddRow(4, 1000000000, 1000000000, "owner", "prod", true))
-	mock.ExpectQuery("SELECT COUNT\\(\\*\\) FROM").WithArgs("org", "space", "abc").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	mock.ExpectQuery("SELECT COUNT\\(\\*\\),COALESCE").WithArgs("org", "space", "abc").WillReturnRows(sqlmock.NewRows([]string{"count", "bytes", "max_bytes"}).AddRow(1, 3000, 3000))
 	mock.ExpectQuery("SELECT trace_id,").WithArgs("org", "space", "abc").WillReturnRows(sqlmock.NewRows([]string{"trace_id", "span_id", "start_time_unix_nano", "end_time_unix_nano", "status_code", "resource_attributes", "attributes", "events", "links", "payload", "user_id"}).AddRow("abc", "def", "1000000000", "1000000001", 0, `{"aivision.agent.id":"agent"}`, `{}`, `[]`, `[]`, `{}`, "owner"))
 	mock.ExpectCommit()
 	result, err := s.traceSourceSnapshot(context.Background(), "org", "space", "abc")
@@ -138,8 +143,8 @@ func TestReadModelLiteralTagsAndNanosecondOrder(t *testing.T) {
 	_, _, err = readModelWhere("org", p)
 	require.Error(t, err)
 }
-func TestReadModelDefaultDisabled(t *testing.T) {
-	require.Equal(t, "read_model_disabled", (&oceanBaseStore{}).readModelUnavailable())
+func TestReadModelRequiresTransactionalStore(t *testing.T) {
+	require.Equal(t, "transactional_store_unavailable", (&oceanBaseStore{}).readModelUnavailable())
 }
 
 func TestPreviewPreservesNullAndEmptyIO(t *testing.T) {
@@ -163,4 +168,35 @@ func TestIndependentFacetWindowPreservesAuthorizationScope(t *testing.T) {
 	require.Equal(t, p.ProjectionContext, window.ProjectionContext)
 	_, stillFiltered := readModelWindowParams(window)
 	require.False(t, stillFiltered)
+}
+
+func TestPublishRejectsGenerationChangeBeforeReusedRevision(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	s := &oceanBaseStore{db: db, cfg: config{TablePrefix: "test"}}
+	p := validProjection()
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT enabled,generation,schema_version FROM.*FOR UPDATE").WillReturnRows(sqlmock.NewRows([]string{"enabled", "generation", "schema_version"}).AddRow(true, 2, 1))
+	mock.ExpectRollback()
+	result, err := s.publishTraceProjection(context.Background(), "org", p)
+	require.NoError(t, err)
+	require.Equal(t, readModelUnsupported("maintenance_generation_changed"), result)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSourceSnapshotRejectsStatusPayloadBeforeFetchingLongtext(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	s := &oceanBaseStore{db: db, cfg: config{TablePrefix: "test"}}
+	mock.ExpectBegin()
+	expectProjectionMaintenance(mock, true, false)
+	mock.ExpectQuery("SELECT source_revision,min_timestamp").WillReturnRows(sqlmock.NewRows([]string{"revision", "min", "max", "user", "product", "valid"}).AddRow(1, 100, 200, "owner", "product", true))
+	mock.ExpectQuery("SELECT COUNT.*OCTET_LENGTH.*status_message").WillReturnRows(sqlmock.NewRows([]string{"count", "bytes", "max_bytes"}).AddRow(5000, 300*1024*1024, 60000))
+	mock.ExpectRollback()
+	result, err := s.traceSourceSnapshot(context.Background(), "org", "space", "abc")
+	require.NoError(t, err)
+	require.Equal(t, readModelUnsupported("source_snapshot_payload_limit"), result)
+	require.NoError(t, mock.ExpectationsWereMet())
 }

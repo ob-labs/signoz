@@ -174,47 +174,40 @@ func sessionMatchSQL(p sessionReadModelParams, excluded string) (string, []any) 
 
 // The match bit chooses sessions; WHERE never removes their unrelated turns.
 func sessionGroupSQL(org, table string, p sessionReadModelParams, excluded string) (string, []any, error) {
-	return sessionGroupSQLWithStrategy(org, table, p, excluded, false)
+	return sessionGroupSQLWithTokenStrategy(org, table, p, excluded, false)
 }
 
 func (s *oceanBaseStore) sessionGroupSQL(org, table string, p sessionReadModelParams, excluded string) (string, []any, error) {
-	return sessionGroupSQLWithTokenStrategy(org, table, p, excluded, s.sessionTokenQueryOptimized, s.sessionTokenGeneratedReady)
+	return sessionGroupSQLWithTokenStrategy(org, table, p, excluded, s.sessionTokenGeneratedReady)
 }
 
 func (s *oceanBaseStore) sessionTokenQueryStrategy(p sessionReadModelParams) string {
 	if s.sessionTokenGeneratedReady && p.MinTotalTokens != nil {
 		return "generated_columns"
 	}
-	if s.sessionTokenQueryOptimized && p.MinTotalTokens != nil {
+	if p.MinTotalTokens != nil {
 		return "json_table"
 	}
-	return "original"
+	return "not_requested"
 }
 
-func sessionGroupSQLWithStrategy(org, table string, p sessionReadModelParams, excluded string, optimized bool) (string, []any, error) {
-	return sessionGroupSQLWithTokenStrategy(org, table, p, excluded, optimized, false)
-}
-
-func sessionGroupSQLWithTokenStrategy(org, table string, p sessionReadModelParams, excluded string, optimized, generated bool) (string, []any, error) {
+func sessionGroupSQLWithTokenStrategy(org, table string, p sessionReadModelParams, excluded string, generated bool) (string, []any, error) {
 	where, scopeArgs, err := sessionScopeSQL(org, p)
 	if err != nil {
 		return "", nil, err
 	}
 	match, matchArgs := sessionMatchSQL(p, excluded)
-	billableCalls := "JSON_EXTRACT(p.row_json,'$.coverage.billableCalls')"
-	totalTokens := "JSON_EXTRACT(p.row_json,'$.usage.total')"
-	tokenUsageJoin := ""
-	if optimized && p.MinTotalTokens != nil {
-		// Keep JSON types and the original CASE/cast semantics: strings remain
-		// strings and large integers must never pass through floating point.
-		billableCalls, totalTokens = "token_usage.billable_calls", "token_usage.total_tokens"
-		tokenUsageJoin = ",JSON_TABLE(p.row_json,'$' COLUMNS (billable_calls JSON PATH '$.coverage.billableCalls' NULL ON EMPTY ERROR ON ERROR,total_tokens JSON PATH '$.usage.total' NULL ON EMPTY ERROR ON ERROR)) token_usage"
-	}
-	tokenValue := "CASE WHEN " + billableCalls + "=0 THEN 0 WHEN " + billableCalls + ">0 AND JSON_TYPE(" + totalTokens + ") IN ('INTEGER','UNSIGNED INTEGER','DOUBLE','DECIMAL') THEN CAST(JSON_UNQUOTE(" + totalTokens + ") AS DECIMAL(65,0)) ELSE NULL END"
-	billableValue := "CASE WHEN " + billableCalls + ">0 THEN 1 ELSE 0 END"
-	if generated && p.MinTotalTokens != nil {
-		tokenValue, billableValue = "p."+sessionTokenGeneratedValueColumn, "p."+sessionTokenGeneratedBillableColumn
-		tokenUsageJoin = ""
+	tokenValue, billableValue, tokenUsageJoin := "NULL", "0", ""
+	if p.MinTotalTokens != nil {
+		if generated {
+			tokenValue, billableValue = "p."+sessionTokenGeneratedValueColumn, "p."+sessionTokenGeneratedBillableColumn
+		} else {
+			// Only the compatibility path parses JSON, once per Trace. JSON
+			// types and DECIMAL casts preserve unknown-versus-zero semantics.
+			tokenUsageJoin = ",JSON_TABLE(p.row_json,'$' COLUMNS (billable_calls JSON PATH '$.coverage.billableCalls' NULL ON EMPTY ERROR ON ERROR,total_tokens JSON PATH '$.usage.total' NULL ON EMPTY ERROR ON ERROR)) token_usage"
+			tokenValue = "CASE WHEN token_usage.billable_calls=0 THEN 0 WHEN token_usage.billable_calls>0 AND JSON_TYPE(token_usage.total_tokens) IN ('INTEGER','UNSIGNED INTEGER','DOUBLE','DECIMAL') THEN CAST(JSON_UNQUOTE(token_usage.total_tokens) AS DECIMAL(65,0)) ELSE NULL END"
+			billableValue = "CASE WHEN token_usage.billable_calls>0 THEN 1 ELSE 0 END"
+		}
 	}
 	inner := "SELECT p.session_id,p.start_ns,p.end_ns,p.status,CASE WHEN " + match + " THEN 1 ELSE 0 END AS matched," + tokenValue + " AS trace_tokens," + billableValue + " AS billable FROM " + table + " p" + tokenUsageJoin + " WHERE " + where
 	query := "SELECT session_id,COUNT(*) AS trace_count,MAX(COALESCE(end_ns,start_ns)) AS last_activity FROM (" + inner + ") canonical GROUP BY BINARY session_id,session_id HAVING SUM(matched)>0"
@@ -379,9 +372,6 @@ func sessionPageBatchRows(ctx context.Context, tx *sql.Tx, table, scope string, 
 }
 
 func (s *oceanBaseStore) sessionReadModelPage(ctx context.Context, org string, p sessionReadModelParams) (any, error) {
-	if !s.authoritativeIngest {
-		return readModelUnsupported("authoritative_ingest_not_asserted"), nil
-	}
 	table := s.readModelTable("trace_projections")
 	groupSQL, args, err := s.sessionGroupSQL(org, table, p, "")
 	if e, ok := err.(tracePageUnsupported); ok {
@@ -395,6 +385,11 @@ func (s *oceanBaseStore) sessionReadModelPage(ctx context.Context, org string, p
 		return nil, err
 	}
 	defer tx.Rollback()
+	if reason, err := s.projectionMaintenanceReason(ctx, tx, false); err != nil {
+		return nil, err
+	} else if reason != "" {
+		return readModelUnsupported(reason), nil
+	}
 	if reason, err := s.sessionReadModelCoverage(ctx, tx, org, p); err != nil {
 		return nil, err
 	} else if reason != "" {
@@ -404,8 +399,8 @@ func (s *oceanBaseStore) sessionReadModelPage(ctx context.Context, org string, p
 	// Never mutate the shared store: requests can use different snapshots.
 	queryStore := *s
 	queryStore.sessionTokenGeneratedReady = false
-	generatedReason := "disabled"
-	if s.sessionTokenGeneratedColumns && p.MinTotalTokens != nil {
+	generatedReason := "not_requested"
+	if p.MinTotalTokens != nil {
 		ready, reason, capabilityErr := s.sessionTokenGeneratedCapability(ctx, tx)
 		if capabilityErr != nil {
 			return nil, capabilityErr
@@ -445,17 +440,14 @@ func (s *oceanBaseStore) sessionReadModelPage(ctx context.Context, org string, p
 		return nil, err
 	}
 	match, matchArgs := sessionMatchSQL(p, "")
-	var batchRows map[string][]map[string]any
-	if s.sessionPageBatchEnabled {
-		var reason string
-		batchRows, reason, err = sessionPageBatchRows(ctx, tx, table, scope, scopeArgs, match, matchArgs, groups, p.Limit)
-		if err != nil {
-			return nil, err
-		}
-		if reason != "" {
-			return readModelUnsupported(reason), nil
-		}
+	batchRows, reason, err := sessionPageBatchRows(ctx, tx, table, scope, scopeArgs, match, matchArgs, groups, p.Limit)
+	if err != nil {
+		return nil, err
 	}
+	if reason != "" {
+		return readModelUnsupported(reason), nil
+	}
+
 	for _, group := range groups {
 		sid, ok := group["session_id"].(string)
 		if !ok || sid == "" {
@@ -469,29 +461,7 @@ func (s *oceanBaseStore) sessionReadModelPage(ctx context.Context, org string, p
 		if pageTraces > sessionPageTraceLimit {
 			return readModelUnsupported("session_page_trace_limit"), nil
 		}
-		var rows []map[string]any
-		if s.sessionPageBatchEnabled {
-			rows = batchRows[sid]
-		} else {
-			// Check the selected group's bounded summaries before fetching them into
-			// Go. The source documents can contain very large complete root IO; JSON
-			// removal and byte accounting happen inside storage, not after decoding.
-			prunedRow := sessionSummarySQL()
-			sizeArgs := append(append([]any{}, scopeArgs...), sid)
-			var selectedBytes int64
-			if err := tx.QueryRowContext(ctx, "SELECT COALESCE(SUM(OCTET_LENGTH("+prunedRow+")+OCTET_LENGTH(p.preview_json)+100),0) FROM "+table+" p WHERE "+scope+" AND BINARY p.session_id=BINARY ?", sizeArgs...).Scan(&selectedBytes); err != nil {
-				return nil, err
-			}
-			if selectedBytes < 0 || selectedBytes > int64(sessionPagePayloadLimit-payloadBytes) {
-				return readModelUnsupported("session_page_payload_limit"), nil
-			}
-			traceArgs := append(append([]any{}, matchArgs...), scopeArgs...)
-			traceArgs = append(traceArgs, sid, sessionPageTraceLimit+1)
-			rows, err = scanReadModelRows(ctx, tx, "SELECT "+prunedRow+" AS row_json,p.preview_json,p.source_revision,CASE WHEN "+match+" THEN 1 ELSE 0 END AS matched FROM "+table+" p WHERE "+scope+" AND BINARY p.session_id=BINARY ? ORDER BY p.start_ns ASC,BINARY p.trace_id ASC LIMIT ?", traceArgs...)
-			if err != nil {
-				return nil, err
-			}
-		}
+		rows := batchRows[sid]
 		if int64(len(rows)) != count {
 			return nil, fmt.Errorf("incomplete canonical session group")
 		}
@@ -511,7 +481,7 @@ func (s *oceanBaseStore) sessionReadModelPage(ctx context.Context, org string, p
 			if canonical["session_id"] != sid {
 				return nil, fmt.Errorf("session projection identity mismatch")
 			}
-			if s.sessionPageBatchEnabled && canonical["trace_id"] != raw["trace_id"] {
+			if canonical["trace_id"] != raw["trace_id"] {
 				return nil, fmt.Errorf("session projection Trace identity mismatch")
 			}
 			m, e := asInt64(raw["matched"])
@@ -569,13 +539,10 @@ func (s *oceanBaseStore) sessionReadModelPage(ctx context.Context, org string, p
 	}
 	meta := map[string]any{"contract": sessionReadModelContract, "sessionSemantics": "canonical-trace-v1", "environmentSemantics": "root-span-resource-v1", "userIdentitySemantics": "trace-sdk-user-id-v1", "complete": true, "queryMode": "read_model", "projection_context": p.ProjectionContext, "from": p.From, "to": p.To, "space_id": p.SpaceID, "agent_product": p.AgentProduct, "user": p.User, "agent_uuid": p.AgentUUID, "page": p.Page, "limit": p.Limit, "totalItems": total, "totalPages": (total + p.Limit - 1) / p.Limit, "windowTotalItems": windowTotal}
 	meta["sessionTokenQueryStrategy"] = queryStore.sessionTokenQueryStrategy(p)
-	if s.sessionTokenGeneratedColumns && p.MinTotalTokens != nil {
+	if p.MinTotalTokens != nil {
 		meta["sessionTokenGeneratedColumns"] = generatedReason
 	}
-	meta["sessionPageSummaryStrategy"] = "individual"
-	if s.sessionPageBatchEnabled {
-		meta["sessionPageSummaryStrategy"] = "batch"
-	}
+	meta["sessionPageSummaryStrategy"] = "batch"
 	result := map[string]any{"supported": true, "data": data, "facets": facets, "meta": meta}
 	encoded, err := json.Marshal(result)
 	if err != nil {

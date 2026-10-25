@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"github.com/SigNoz/signoz/pkg/ingest"
 	"regexp"
 	"strings"
 )
@@ -14,10 +15,10 @@ import (
 // Source revision/context/semantics are still checked by the ordinary coverage
 // guard in the same read transaction. No application-maintained helper is used.
 const (
-	sessionTokenGeneratedValueColumn    = "session_trace_tokens_v1"
-	sessionTokenGeneratedBillableColumn = "session_billable_v1"
-	sessionTokenGeneratedValueExpr      = "CASE WHEN JSON_EXTRACT(row_json,'$.coverage.billableCalls')=0 THEN 0 WHEN JSON_EXTRACT(row_json,'$.coverage.billableCalls')>0 AND JSON_TYPE(JSON_EXTRACT(row_json,'$.usage.total')) IN ('INTEGER','UNSIGNED INTEGER','DOUBLE','DECIMAL') THEN CAST(JSON_UNQUOTE(JSON_EXTRACT(row_json,'$.usage.total')) AS DECIMAL(65,0)) ELSE NULL END"
-	sessionTokenGeneratedBillableExpr   = "CASE WHEN JSON_EXTRACT(row_json,'$.coverage.billableCalls')>0 THEN 1 ELSE 0 END"
+	sessionTokenGeneratedValueColumn    = ingest.SessionTokenGeneratedValueColumn
+	sessionTokenGeneratedBillableColumn = ingest.SessionTokenGeneratedBillableColumn
+	sessionTokenGeneratedValueExpr      = ingest.SessionTokenGeneratedValueExpr
+	sessionTokenGeneratedBillableExpr   = ingest.SessionTokenGeneratedBillableExpr
 	// These are the full metadata forms observed on seekdb 1.4.0 and OceanBase
 	// CE 4.4.2.1. Unknown rewrites fail closed; parentheses are not discarded.
 	sessionTokenGeneratedStoredValueExpr    = "(case when (JSON_EXTRACT(`row_json`,'$.coverage.billableCalls') = 0) then 0 when ((JSON_EXTRACT(`row_json`,'$.coverage.billableCalls') > 0) and (JSON_TYPE(JSON_EXTRACT(`row_json`,'$.usage.total')) in ('INTEGER','UNSIGNED INTEGER','DOUBLE','DECIMAL'))) then cast(JSON_UNQUOTE(JSON_EXTRACT(`row_json`,'$.usage.total')) as number(65,0)) else NULL end)"
@@ -26,10 +27,9 @@ const (
 
 var sessionTokenGeneratedPrefix = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,31}$`)
 
-// sessionTokenGeneratedDDL only returns an explicit maintenance statement. It
-// is never called by startup, publishing, a read request or capability probing.
-// A populated-table ALTER can materialize work and affect write validation;
-// operators must separately validate and authorize its maintenance window.
+// sessionTokenGeneratedDDL is also retained for the explicit maintenance SQL
+// compatibility tests. Standard startup owns the versioned migration; query
+// requests only inspect capability and never run DDL.
 func sessionTokenGeneratedDDL(prefix string) (string, error) {
 	if !sessionTokenGeneratedPrefix.MatchString(prefix) {
 		return "", fmt.Errorf("invalid session token generated-column table prefix")

@@ -2,6 +2,7 @@ package aivision
 
 import (
 	"context"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -9,9 +10,11 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -20,36 +23,44 @@ const traceReadModelContract = "native-trace-read-model-v1"
 var projectionContextPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 var readModelTraceID = regexp.MustCompile(`^[0-9a-f]{1,32}$`)
 
+func readModelRequestTimeout(action string, queryTimeout time.Duration) time.Duration {
+	if action == "maintenance/resume" {
+		return 2 * time.Minute
+	}
+	return queryTimeout
+}
+
 type traceProjection struct {
-	ProjectionContext string          `json:"projection_context"`
-	SpaceID           string          `json:"space_id"`
-	TraceID           string          `json:"trace_id"`
-	SourceRevision    int64           `json:"source_revision"`
-	SemanticsVersion  int             `json:"semantics_version"`
-	AgentUUID         string          `json:"agent_uuid"`
-	AgentProduct      string          `json:"agent_product"`
-	UserID            string          `json:"user_id"`
-	Period            int64           `json:"period"`
-	Duration          *float64        `json:"duration"`
-	Status            int             `json:"status"`
-	NodeCount         int64           `json:"node_count"`
-	Environment       *string         `json:"environment"`
-	Scene             string          `json:"scene"`
-	SceneValues       []string        `json:"scene_values"`
-	Username          *string         `json:"username"`
-	SessionID         string          `json:"session_id"`
-	Name              string          `json:"name"`
-	Model             string          `json:"model"`
-	SearchText        string          `json:"search_text"`
-	InputText         string          `json:"input_text"`
-	OutputText        string          `json:"output_text"`
-	Tags              []string        `json:"tags"`
-	Row               json.RawMessage `json:"row"`
-	Preview           json.RawMessage `json:"preview"`
+	ProjectionContext     string          `json:"projection_context"`
+	SpaceID               string          `json:"space_id"`
+	TraceID               string          `json:"trace_id"`
+	SourceRevision        int64           `json:"source_revision"`
+	MaintenanceGeneration int64           `json:"maintenance_generation"`
+	SemanticsVersion      int             `json:"semantics_version"`
+	AgentUUID             string          `json:"agent_uuid"`
+	AgentProduct          string          `json:"agent_product"`
+	UserID                string          `json:"user_id"`
+	Period                int64           `json:"period"`
+	Duration              *float64        `json:"duration"`
+	Status                int             `json:"status"`
+	NodeCount             int64           `json:"node_count"`
+	Environment           *string         `json:"environment"`
+	Scene                 string          `json:"scene"`
+	SceneValues           []string        `json:"scene_values"`
+	Username              *string         `json:"username"`
+	SessionID             string          `json:"session_id"`
+	Name                  string          `json:"name"`
+	Model                 string          `json:"model"`
+	SearchText            string          `json:"search_text"`
+	InputText             string          `json:"input_text"`
+	OutputText            string          `json:"output_text"`
+	Tags                  []string        `json:"tags"`
+	Row                   json.RawMessage `json:"row"`
+	Preview               json.RawMessage `json:"preview"`
 }
 
 func validateTraceProjection(p traceProjection) error {
-	if !projectionContextPattern.MatchString(p.ProjectionContext) || p.SpaceID == "" || len(p.SpaceID) > 255 || !readModelTraceID.MatchString(p.TraceID) || p.SourceRevision < 1 || p.SemanticsVersion != 1 || p.AgentUUID == "" || len(p.AgentUUID) > 255 {
+	if !projectionContextPattern.MatchString(p.ProjectionContext) || p.SpaceID == "" || len(p.SpaceID) > 255 || !readModelTraceID.MatchString(p.TraceID) || p.SourceRevision < 1 || p.MaintenanceGeneration < 1 || p.SemanticsVersion != 1 || p.AgentUUID == "" || len(p.AgentUUID) > 255 {
 		return fmt.Errorf("invalid projection scope, revision or semantics_version")
 	}
 	if p.Period < 0 || p.Period > math.MaxInt64/1000000 || p.Duration != nil && (*p.Duration < 0 || math.IsNaN(*p.Duration) || math.IsInf(*p.Duration, 0)) || p.NodeCount < 0 || p.NodeCount > 9007199254740991 {
@@ -141,9 +152,6 @@ func readModelUnsupported(reason string) map[string]any {
 	return map[string]any{"supported": false, "reason": reason}
 }
 func (s *oceanBaseStore) readModelUnavailable() string {
-	if !s.readModelEnabled {
-		return "read_model_disabled"
-	}
 	if s.db == nil {
 		return "transactional_store_unavailable"
 	}
@@ -160,11 +168,49 @@ func (h *handler) ReadModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	action := strings.TrimPrefix(r.URL.Path, "/api/v1/ai-vision/traces/read-model/")
-	ctx, cancel := context.WithTimeout(r.Context(), h.cfg.QueryTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), readModelRequestTimeout(action, h.cfg.QueryTimeout))
 	defer cancel()
 	var result any
 	var err error
 	switch action {
+	case "batch-snapshot", "batch-publish":
+		method := http.MethodGet
+		if action == "batch-publish" {
+			method = http.MethodPost
+		}
+		if r.Method != method {
+			methodNotAllowed(w, method)
+			return
+		}
+		result, err = h.projectionBatchAction(r, ctx, org, action)
+	case "window":
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w, http.MethodGet)
+			return
+		}
+		var p nativeListParams
+		var raw bool
+		p, raw, err = h.traceWindowParams(r)
+		if err == nil {
+			result, err = h.backend.traceWindow(ctx, org, p, raw)
+		}
+	case "maintenance/resume":
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w, http.MethodPost)
+			return
+		}
+		if !projectionResumeOperatorAuthorized(r) {
+			writeAPIError(w, http.StatusForbidden, "forbidden", "deployment operator authorization required")
+			return
+		}
+		if !ingest.ProjectionMaintenanceEnabled() {
+			result = readModelUnsupported("projection_maintenance_disabled")
+		} else {
+			err = ingest.ResumeProjectionMaintenance(ctx, h.backend.db, h.backend.cfg.TablePrefix)
+			if err == nil {
+				result = map[string]any{"supported": true, "resumed": true}
+			}
+		}
 	case "sessions/page":
 		var p sessionReadModelParams
 		p, err = h.sessionReadModelParams(r)
@@ -332,6 +378,13 @@ func (s *oceanBaseStore) traceSourceSnapshot(ctx context.Context, org, space, tr
 		return nil, err
 	}
 	defer tx.Rollback()
+	enabled, generation, err := ingest.ReadProjectionMaintenance(ctx, tx, s.cfg.TablePrefix)
+	if err != nil {
+		return nil, err
+	}
+	if !enabled {
+		return readModelUnsupported("projection_maintenance_unavailable"), nil
+	}
 	var revision, min, max int64
 	var sourceUser, sourceProduct string
 	var scopeValid bool
@@ -342,40 +395,50 @@ func (s *oceanBaseStore) traceSourceSnapshot(ctx context.Context, org, space, tr
 	if err != nil {
 		return nil, err
 	}
-	var count int64
-	err = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+s.tracesTable()+" WHERE org_id=? AND space_id=? AND trace_id=?", org, space, trace).Scan(&count)
+	var count, sourceBytes, maxSpanBytes int64
+	err = tx.QueryRowContext(ctx, "SELECT COUNT(*),COALESCE(SUM("+nativeSpanSourceBytesSQL()+"),0),COALESCE(MAX("+nativeSpanSourceBytesSQL()+"),0) FROM "+s.tracesTable()+" WHERE org_id=? AND space_id=? AND trace_id=?", org, space, trace).Scan(&count, &sourceBytes, &maxSpanBytes)
 	if err != nil {
 		return nil, err
 	}
 	if count == 0 || count > 100000 {
 		return readModelUnsupported("source_empty_or_too_large"), nil
 	}
-	rows, err := scanReadModelRows(ctx, tx, "SELECT "+nativeSpanProjection+" FROM "+s.tracesTable()+" WHERE org_id=? AND space_id=? AND trace_id=? ORDER BY timestamp,span_id", org, space, trace)
+	if sourceBytes > projectionBatchPayloadLimit || maxSpanBytes > traceSpanSourceByteLimit {
+		return readModelUnsupported("source_snapshot_payload_limit"), nil
+	}
+	rows := []map[string]any{}
+	wireBytes := 0
+	err = scanReadModelRowsEach(ctx, tx, "SELECT "+nativeSpanProjection+" FROM "+s.tracesTable()+" WHERE org_id=? AND space_id=? AND trace_id=? ORDER BY timestamp,span_id", []any{org, space, trace}, func(row map[string]any) error {
+		if err := decodeWindowSpan(row); err != nil {
+			return tracePageUnsupported{"source_json_invalid"}
+		}
+		if err := compactNativeSpan(row); err != nil {
+			return err
+		}
+		size, err := encodedSpanBytes(row)
+		if err != nil {
+			return err
+		}
+		wireBytes += size
+		if wireBytes > projectionBatchPayloadLimit-4096 {
+			return tracePageUnsupported{"source_snapshot_payload_limit"}
+		}
+		rows = append(rows, row)
+		return nil
+	})
+	if unsupported, ok := err.(tracePageUnsupported); ok {
+		return readModelUnsupported(unsupported.reason), nil
+	}
 	if err != nil {
 		return nil, err
 	}
 	if int64(len(rows)) != count {
 		return readModelUnsupported("source_snapshot_incomplete"), nil
 	}
-	for _, row := range rows {
-		for _, column := range []string{"resource_attributes", "attributes", "events", "links", "payload"} {
-			if raw, ok := row[column].(string); ok {
-				d := json.NewDecoder(strings.NewReader(raw))
-				d.UseNumber()
-				var value any
-				if d.Decode(&value) != nil {
-					return readModelUnsupported("source_json_invalid"), nil
-				}
-				row[column] = value
-			}
-		}
-		row["resource"] = row["resource_attributes"]
-		normalizeNativeSpan(row)
-	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	return map[string]any{"supported": true, "source_user_id": sourceUser, "source_agent_product": sourceProduct, "scope_valid": scopeValid, "contract": "native-trace-source-v1", "trace_id": trace, "source_revision": revision, "span_count": count, "min_timestamp": strconv.FormatInt(min, 10), "max_timestamp": strconv.FormatInt(max, 10), "complete": true, "spans": rows}, nil
+	return map[string]any{"supported": true, "source_user_id": sourceUser, "source_agent_product": sourceProduct, "scope_valid": scopeValid, "contract": "native-trace-source-v1", "trace_id": trace, "source_revision": revision, "maintenance_generation": generation, "span_count": count, "min_timestamp": strconv.FormatInt(min, 10), "max_timestamp": strconv.FormatInt(max, 10), "complete": true, "spans": rows}, nil
 }
 func (s *oceanBaseStore) dirtyTraceSources(ctx context.Context, org, space, projectionContext, after string, limit int) (any, error) {
 	tx, err := s.beginReadModel(ctx, true)
@@ -383,6 +446,11 @@ func (s *oceanBaseStore) dirtyTraceSources(ctx context.Context, org, space, proj
 		return nil, err
 	}
 	defer tx.Rollback()
+	if reason, err := s.projectionMaintenanceReason(ctx, tx, false); err != nil {
+		return nil, err
+	} else if reason != "" {
+		return readModelUnsupported(reason), nil
+	}
 	query := "SELECT s.trace_id,s.source_revision FROM " + s.readModelTable("trace_sources") + " s LEFT JOIN " + s.readModelTable("trace_projections") + " p ON p.org_id=s.org_id AND p.space_id=s.space_id AND p.trace_id=s.trace_id WHERE s.org_id=? AND s.space_id=? AND (s.scope_valid=FALSE OR s.dirty=TRUE OR p.trace_id IS NULL OR p.source_revision<>s.source_revision OR p.semantics_version<>1 OR p.projection_context<>?) AND s.trace_id>? ORDER BY BINARY s.trace_id LIMIT ?"
 	rows, err := scanReadModelRows(ctx, tx, query, org, space, projectionContext, after, limit+1)
 	if err != nil {
@@ -407,6 +475,16 @@ func (s *oceanBaseStore) publishTraceProjection(ctx context.Context, org string,
 		return nil, err
 	}
 	defer tx.Rollback()
+	enabled, generation, err := ingest.LockProjectionMaintenance(ctx, tx, s.cfg.TablePrefix)
+	if err != nil {
+		return nil, err
+	}
+	if !enabled {
+		return readModelUnsupported("projection_maintenance_unavailable"), nil
+	}
+	if p.MaintenanceGeneration != generation {
+		return readModelUnsupported("maintenance_generation_changed"), nil
+	}
 	var revision int64
 	var sourceUser, sourceProduct string
 	var scopeValid bool
@@ -451,7 +529,7 @@ func (s *oceanBaseStore) publishTraceProjection(ctx context.Context, org string,
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	return map[string]any{"supported": true, "published": true, "source_revision": revision}, nil
+	return map[string]any{"supported": true, "published": true, "source_revision": revision, "maintenance_generation": generation}, nil
 }
 func (s *oceanBaseStore) backfillTraceSources(ctx context.Context, org, space string, limit int) (any, error) {
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
@@ -459,6 +537,11 @@ func (s *oceanBaseStore) backfillTraceSources(ctx context.Context, org, space st
 		return nil, err
 	}
 	defer tx.Rollback()
+	if reason, err := s.projectionMaintenanceReason(ctx, tx, true); err != nil {
+		return nil, err
+	} else if reason != "" {
+		return readModelUnsupported(reason), nil
+	}
 	coverage := s.readModelTable("trace_projection_coverage")
 	if _, err := tx.ExecContext(ctx, "INSERT IGNORE INTO "+coverage+" (org_id,space_id) VALUES (?,?)", org, space); err != nil {
 		return nil, err
@@ -691,9 +774,6 @@ func readModelWindowParams(p nativeListParams) (nativeListParams, bool) {
 }
 
 func (s *oceanBaseStore) readModelPage(ctx context.Context, org string, p nativeListParams) (any, error) {
-	if !s.authoritativeIngest {
-		return readModelUnsupported("authoritative_ingest_not_asserted"), nil
-	}
 	where, args, err := readModelWhere(org, p)
 	if e, ok := err.(tracePageUnsupported); ok {
 		return readModelUnsupported(e.reason), nil
@@ -713,6 +793,11 @@ func (s *oceanBaseStore) readModelPage(ctx context.Context, org string, p native
 		return nil, err
 	}
 	defer tx.Rollback()
+	if reason, err := s.projectionMaintenanceReason(ctx, tx, false); err != nil {
+		return nil, err
+	} else if reason != "" {
+		return readModelUnsupported(reason), nil
+	}
 	var covered bool
 	err = tx.QueryRowContext(ctx, "SELECT complete FROM "+s.readModelTable("trace_projection_coverage")+" WHERE org_id=? AND space_id=?", org, p.SpaceID).Scan(&covered)
 	if err == sql.ErrNoRows || err == nil && !covered {
@@ -823,4 +908,33 @@ func (s *oceanBaseStore) readModelPage(ctx context.Context, org string, p native
 	}
 	meta := map[string]any{"contract": traceReadModelContract, "queryMode": "read_model", "queryContract": traceReadModelContract, "environmentSemantics": "root-span-resource-v1", "userIdentitySemantics": "trace-sdk-user-id-v1", "complete": true, "projection_context": p.ProjectionContext, "from": p.From, "to": p.To, "space_id": p.SpaceID, "agent_product": p.AgentProduct, "user": p.User, "agent_uuid": p.AgentUUID, "page": p.Page, "limit": p.Limit, "totalItems": total, "windowTotalItems": windowTotal, "totalPages": (total + p.Limit - 1) / p.Limit}
 	return map[string]any{"supported": true, "data": data, "facets": facets, "meta": meta}, nil
+}
+
+// The shared durable state is read inside the request snapshot. A maintenance
+// OFF transition must revoke this state before any untracked writes commit.
+func (s *oceanBaseStore) projectionMaintenanceReason(ctx context.Context, tx *sql.Tx, lock bool) (string, error) {
+	var enabled bool
+	var err error
+	if lock {
+		enabled, _, err = ingest.LockProjectionMaintenance(ctx, tx, s.cfg.TablePrefix)
+	} else {
+		enabled, _, err = ingest.ReadProjectionMaintenance(ctx, tx, s.cfg.TablePrefix)
+	}
+	if err != nil {
+		return "", err
+	}
+	if !enabled {
+		return "projection_maintenance_unavailable", nil
+	}
+	return "", nil
+}
+
+// Resume changes a database-wide generation, so organization administrator
+// permission alone is insufficient. The route also requires AdminAccess and
+// this existing deployment-operator ingestion secret. Ordinary projectors do
+// not possess or need that secret.
+func projectionResumeOperatorAuthorized(r *http.Request) bool {
+	expected := os.Getenv("SIGNOZ_INGEST_INTERNAL_KEY")
+	supplied := r.Header.Get("X-Signoz-Ingest-Key")
+	return expected != "" && supplied != "" && subtle.ConstantTimeCompare([]byte(expected), []byte(supplied)) == 1
 }

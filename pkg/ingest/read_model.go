@@ -34,9 +34,17 @@ func traceSourceKeys(rows [][]any) []traceSourceKey {
 }
 
 // EnsureTraceReadModelSchema is additive. Raw spans remain the source of truth.
-// Tracking is separately gated. Activation resets historical coverage and
-// reconciliation refreshes every revision before the model is eligible again.
+// Standard token columns are part of every new projection table. Existing
+// tables are upgraded by the versioned maintenance initializer, never reads.
 func EnsureTraceReadModelSchema(ctx context.Context, db *sql.DB, prefix string) error {
+	return ensureTraceReadModelSchema(ctx, db, prefix)
+}
+
+type projectionSchemaExecutor interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func ensureTraceReadModelSchema(ctx context.Context, db projectionSchemaExecutor, prefix string) error {
 	if !tablePrefixPattern.MatchString(prefix) {
 		return fmt.Errorf("invalid table prefix")
 	}
@@ -57,11 +65,13 @@ func EnsureTraceReadModelSchema(ctx context.Context, db *sql.DB, prefix string) 
  session_id VARCHAR(255) NOT NULL DEFAULT '', name VARCHAR(512) NOT NULL DEFAULT '', model VARCHAR(255) NOT NULL DEFAULT '',
  search_text LONGTEXT NOT NULL, input_text LONGTEXT NOT NULL, output_text LONGTEXT NOT NULL,
  scene_values_json LONGTEXT NOT NULL, tags_json LONGTEXT NOT NULL, row_json LONGTEXT NOT NULL, preview_json LONGTEXT NOT NULL,
+ session_trace_tokens_v1 DECIMAL(65,0) GENERATED ALWAYS AS (%s) STORED,
+ session_billable_v1 TINYINT GENERATED ALWAYS AS (%s) STORED,
  PRIMARY KEY(org_id,space_id,trace_id),
  KEY idx_projection_agent_period(org_id,space_id,agent_uuid,start_ns),
  KEY idx_projection_agent_environment(org_id,space_id,environment,period),
  KEY idx_projection_agent_username(org_id,space_id,username,period)
- ) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`, tableName(prefix, "trace_projections")),
+ ) DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`, tableName(prefix, "trace_projections"), SessionTokenGeneratedValueExpr, SessionTokenGeneratedBillableExpr),
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
  org_id VARCHAR(255) NOT NULL, space_id VARCHAR(255) NOT NULL, after_trace_id VARCHAR(32) NOT NULL DEFAULT '',
  complete BOOLEAN NOT NULL DEFAULT FALSE, PRIMARY KEY(org_id,space_id)
@@ -96,13 +106,8 @@ func LockTraceSource(ctx context.Context, tx *sql.Tx, prefix, org, space, trace 
 	return err
 }
 
-// InitializeTraceReadModelTracking belongs to telemetry-store initialization,
-// independently of the optional ingest listener. Every tracking-enabled startup
-// must invalidate coverage, including query-only configurations with no key.
+// InitializeTraceReadModelTracking is retained as an internal test/bootstrap
+// helper. Unlike the old implementation, ordinary restarts retain coverage.
 func InitializeTraceReadModelTracking(ctx context.Context, db *sql.DB, prefix string) error {
-	if err := EnsureTraceReadModelSchema(ctx, db, prefix); err != nil {
-		return err
-	}
-	_, err := db.ExecContext(ctx, "UPDATE "+tableName(prefix, "trace_projection_coverage")+" SET after_trace_id='',complete=FALSE")
-	return err
+	return InitializeTraceReadModelMaintenance(ctx, db, prefix, true)
 }

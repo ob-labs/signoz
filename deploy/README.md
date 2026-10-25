@@ -19,64 +19,36 @@ Foundry has support for **different platforms and architectures**, please review
 Go to our official documentation site [signoz.io/docs](https://signoz.io/docs) for more.
 
 
-## AI Vision Session Token query switch
+## AI Vision native query maintenance
 
-`SIGNOZ_AIVISION_SESSION_TOKEN_QUERY_OPTIMIZATION_ENABLED=true` enables typed
-`JSON_TABLE` extraction for canonical Session requests with a Token threshold,
-including zero. The default is off; only the literal `true` enables it. This
-switch is independent of the Trace read-model and tracking switches and does
-not enable the Session API by itself. Requests without a Token threshold keep
-the original query. Supported responses report the actual path in
-`meta.sessionTokenQueryStrategy` (`original` or `json_table`).
+Native query acceleration is standard in matching source builds. Session pages use
+bounded summary batches; Token thresholds use verified STORED generated values,
+with an internal JSON_TABLE capability fallback. There are no per-strategy flags.
 
-Set the switch to `false` (or unset it) and restart the query service to restore
-the original Token query. No schema migration or backfill is required by this
-switch; the existing read-model coverage requirements still apply.
+`SIGNOZ_AIVISION_PROJECTION_MAINTENANCE_ENABLED` defaults to `true`. Startup applies
+serialized, versioned additive schema migration, including the standard Token
+columns. First activation rebuilds historical derived state; ordinary restarts
+preserve valid coverage/cursors. A failed migration leaves derived serving
+ineligible and retries without changing ordinary query/global SQL deadlines.
+Raw Spans remain authoritative and are never deleted by projection recovery.
 
-## Optional Session page and stored Token acceleration
+Set the maintenance control to `false` and restart writers to durably suspend
+maintenance fleet-wide before untracked raw writes. Default-on replicas cannot
+clear this latch. After repair, set all writers back to `true`, then explicitly
+resume using the AI Vision operator command. The admin-only resume endpoint also
+requires the existing deployment-internal ingest key. Rebuilding removes orphan
+projections and increments the shared generation. Direct SQL import, retention
+or restore requires this suspend/rebuild workflow; external mutation detection
+is not claimed.
 
-Two additional independent switches default off and accept only the literal
-`true`. They require the same canonical read-model coverage and authoritative
-ingestion as the existing Session endpoint:
+AI Vision has one reader control, `AIVISION_QUERY_MODE=auto|raw`, default `auto`.
+It covers Trace lists, canonical Session lists and facets together. The standard
+backend entrypoint supervises automatic projection discovery and maintenance.
+A complete hybrid/raw snapshot supports 50,000 Traces, 500,000 Spans and 256 MiB;
+resource excess is an explicit error, never partial success. See the product
+operator reference and same-data validation report for recovery instructions,
+semantics and prepared-environment testing boundaries.
 
-- `SIGNOZ_AIVISION_SESSION_PAGE_BATCH_ENABLED=true` fetches the selected page's
-  summaries in two queries instead of two queries per Session. It retains the
-  same snapshot, complete turns, match IDs, counts, facets and page order.
-  `meta.sessionPageSummaryStrategy` reports `individual` or `batch`.
-- `SIGNOZ_AIVISION_SESSION_TOKEN_GENERATED_COLUMNS_ENABLED=true` checks for the
-  optional versioned STORED generated columns and uses them for Token thresholds,
-  including zero. `meta.sessionTokenQueryStrategy` reports `generated_columns`
-  only when the complete stored expressions and types match. Missing or
-  mismatched columns retain `json_table` or `original`, according to the first
-  Token switch; `meta.sessionTokenGeneratedColumns` explains the capability
-  result. Inspection/permission/database errors remain errors.
-
-No request, startup hook or publisher executes a schema migration. Validate
-[the forward SQL](oceanbase/session-token-generated-v1.sql) on a representative
-clone first, keep both new switches off, and schedule an explicit maintenance
-window before applying it to a populated projection table. The SQL uses the
-default `signoz` prefix; review the table name for your installation. Measure
-DDL time, write behavior and storage headroom separately from read latency.
-
-The two generated values depend directly on `row_json`, so older publishers
-continue to update them automatically. Existing revision/context/semantics
-coverage checks still run in the same read snapshot. The expressions preserve
-the original SQL CASE, unknown usage and numeric conversion behavior; they do
-not repair the existing JSON/DECIMAL behavior for extremely large numbers.
-Zero is a real threshold and excludes sessions without complete known usage.
-
-Roll out page batching and stored Token reads separately: pilot, 1k, 10k, long
-sessions, large IO and representative framework data. Compare complete result
-oracles, stable order, totals, facets and match IDs before measuring paired
-latencies. The batch path preflights the whole page before fetching summaries;
-it may return the existing payload-limit fallback earlier near the 16 MiB
-boundary. The 50-session, 5,000-Trace and final encoded-size limits remain.
-
-To roll back queries, unset either new switch (or set it to `false`) and restart
-query workers; verify the reported strategies. This retains the stored columns
-and does not reverse their write/storage effect. To reverse that storage change,
-first disable stored Token reads on every worker, verify the JSON strategy,
-then schedule [the separate rollback SQL](oceanbase/session-token-generated-v1-rollback.sql).
-It drops only the two optional derived columns and retains `row_json`, source
-tracking and raw spans. Keep the existing Python `legacy`/`shadow`/`prefer`
-controls available for a broader functional rollback.
+The SQL files in `oceanbase/session-token-generated-v1*.sql` are manual repair
+artifacts for older experimental schemas. They are not required startup steps
+or a functional query rollback. Do not drop standard columns to recover queries.

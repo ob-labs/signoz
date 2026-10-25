@@ -201,7 +201,7 @@ func TestSessionTokenGeneratedCapabilityDoesNotHideInspectionFailures(t *testing
 	}
 }
 
-// Exercise constructor flags, same-transaction capability and all five actual
+// Exercise same-transaction automatic capability and all five actual
 // group-query consumers. Empty pages avoid unrelated summary fixtures while
 // retaining count, page and the three independently selected facet builders.
 func TestSessionTokenGeneratedActualPagePath(t *testing.T) {
@@ -210,10 +210,7 @@ func TestSessionTokenGeneratedActualPagePath(t *testing.T) {
 		name, flag, capability, strategy, reason string
 		threshold                                *int64
 	}{
-		{"default_off", "", "not_queried", "json_table", "", &zero},
-		{"literal_false", "false", "not_queried", "json_table", "", &zero},
-		{"literal_uppercase", "TRUE", "not_queried", "json_table", "", &zero},
-		{"enabled_without_token", "true", "not_queried", "original", "", nil},
+		{"enabled_without_token", "true", "not_queried", "not_requested", "", nil},
 		{"ready_zero", "true", "ready", "generated_columns", "ready", &zero},
 		{"ready_positive", "true", "ready", "generated_columns", "ready", &positive},
 		{"missing_falls_back_to_json", "true", "missing", "json_table", "session_token_columns_missing", &zero},
@@ -262,6 +259,7 @@ func TestSessionTokenGeneratedActualPagePath(t *testing.T) {
 			params := sessionReadModelTestParams()
 			params.MinTotalTokens = tc.threshold
 			mock.ExpectBegin()
+			expectProjectionMaintenance(mock, true, false)
 			mock.ExpectQuery("SELECT complete FROM").WithArgs("org", "space").WillReturnRows(sqlmock.NewRows([]string{"complete"}).AddRow(true))
 			mock.ExpectQuery("SELECT COALESCE").WillReturnRows(sqlmock.NewRows([]string{"stale", "boundary"}).AddRow(0, 0))
 			failure := errors.New("metadata permission denied")

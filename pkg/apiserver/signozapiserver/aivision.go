@@ -27,6 +27,8 @@ func (provider *provider) addAIVisionRoutes(router *mux.Router) error {
 	}{
 		{"traces", "GET", "Traces", h.Traces, traces},
 		{"traces/read-model/page", "GET", "ReadModelPage", h.ReadModel, traces},
+		{"traces/read-model/window", "GET", "ReadModelWindow", h.ReadModel, traces},
+		{"traces/read-model/batch-snapshot", "GET", "ReadModelBatchSnapshot", h.ReadModel, traces},
 		{"traces/read-model/sessions/page", "GET", "SessionReadModelPage", h.ReadModel, traces},
 		{"traces/read-model/snapshot", "GET", "ReadModelSnapshot", h.ReadModel, traces},
 		{"traces/read-model/dirty", "GET", "ReadModelDirty", h.ReadModel, traces},
@@ -75,7 +77,7 @@ func (provider *provider) addAIVisionRoutes(router *mux.Router) error {
 		}
 	}
 
-	for _, action := range []string{"publish", "backfill"} {
+	for _, action := range []string{"publish", "batch-publish", "backfill", "maintenance/resume"} {
 		secured := provider.authzMiddleware.AdminAccess(provider.authzMiddleware.CheckResources(h.ReadModel, authtypes.SigNozAdminRoleName))
 		def := handler.OpenAPIDef{ID: "AIVisionReadModel" + action, Tags: []string{"ai-vision"}, Summary: action, Request: new(map[string]any), RequestContentType: "application/json", Response: new(map[string]any), ResponseContentType: "application/json", SuccessStatusCode: http.StatusOK, SecuritySchemes: newScopedSecuritySchemes([]string{coretypes.ResourceTelemetryResourceTraces.Scope(coretypes.VerbRead)})}
 		if err := router.Handle("/api/v1/ai-vision/traces/read-model/"+action, handler.New(secured, def, handler.WithResourceDefs(handler.TelemetryResourceDef{Verb: coretypes.VerbRead, Category: coretypes.ActionCategoryDataAccess, Selector: querybuilder.TelemetrySelector, Resources: func(coretypes.ExtractorContext) ([]coretypes.ResourceWithID, error) {

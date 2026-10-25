@@ -71,9 +71,9 @@ func TestOceanBaseSessionTokenQuerySemantics(t *testing.T) {
 	p := sessionReadModelTestParams()
 	threshold := int64(0)
 	p.MinTotalTokens = &threshold
-	for _, optimized := range []bool{false, true} {
+	for _, optimized := range []bool{true} {
 		t.Run(fmt.Sprintf("optimized_%t", optimized), func(t *testing.T) {
-			store := &oceanBaseStore{db: db, sessionTokenQueryOptimized: optimized}
+			store := &oceanBaseStore{db: db}
 			query, args, e := store.sessionGroupSQL("org", table, p, "")
 			require.NoError(t, e)
 			// Project the actual production aggregation inputs without HAVING
