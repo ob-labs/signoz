@@ -45,7 +45,9 @@ AI Vision has one reader control, `AIVISION_QUERY_MODE=auto|raw`, default `auto`
 It covers Trace lists, canonical Session lists and facets together. The standard
 backend entrypoint supervises automatic projection discovery and maintenance.
 A complete hybrid/raw snapshot supports 50,000 Traces, 500,000 Spans and 256 MiB;
-resource excess is an explicit error, never partial success. See the product
+If complete summary transport exceeds its budget, recovery selects complete raw
+Spans within the same snapshot. Raw resource
+excess is an explicit error, never partial success. See the product
 operator reference and same-data validation report for recovery instructions,
 semantics and prepared-environment testing boundaries.
 

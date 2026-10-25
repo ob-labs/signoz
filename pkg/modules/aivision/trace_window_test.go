@@ -3,6 +3,7 @@ package aivision
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http/httptest"
 	"strings"
@@ -19,6 +20,10 @@ func expectProjectionMaintenance(mock sqlmock.Sqlmock, enabled bool, lock bool) 
 		query = "SELECT enabled,generation,schema_version FROM.*FOR UPDATE"
 	}
 	mock.ExpectQuery(query).WillReturnRows(sqlmock.NewRows([]string{"enabled", "generation", "schema_version"}).AddRow(enabled, 1, ingest.ProjectionSchemaVersion))
+}
+
+func expectWindowSummaryBytes(mock sqlmock.Sqlmock, count int64) {
+	mock.ExpectQuery("SELECT COALESCE\\(SUM\\(OCTET_LENGTH\\(p.row_json\\)").WillReturnRows(sqlmock.NewRows([]string{"summary_bytes"}).AddRow(count))
 }
 
 func windowTestParams() nativeListParams {
@@ -94,6 +99,7 @@ func TestRecoveryWindowMergesCleanAndDirtyInOneSnapshot(t *testing.T) {
 	mock.ExpectBegin()
 	expectProjectionMaintenance(mock, true, false)
 	mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"traces", "spans", "bytes", "max_bytes"}).AddRow(2, 2, 6000, 3000))
+	expectWindowSummaryBytes(mock, 0)
 	mock.ExpectQuery("SELECT r.trace_id,r.span_count,p.agent_uuid,p.row_json").WillReturnRows(sqlmock.NewRows([]string{"trace_id", "span_count", "agent_uuid", "row_json", "preview_json", "source_revision"}).AddRow("abc", 1, "agent", `{"trace_id":"abc","attributes.gen_ai.input.messages":"complete searchable input"}`, `{"input":"bounded"}`, 3))
 	mock.ExpectQuery("SELECT trace_id,.*NOT EXISTS").WillReturnRows(addWindowSpan(windowSpanRows(), "def"))
 	mock.ExpectCommit()
@@ -176,10 +182,132 @@ func TestRecoveryWindowValidatesEachProjectionBeforeReadingNext(t *testing.T) {
 	expectProjectionMaintenance(mock, true, false)
 	mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"traces", "spans", "bytes", "max_bytes"}).AddRow(2, 2, 6000, 3000))
 	rows := sqlmock.NewRows([]string{"trace_id", "span_count", "agent_uuid", "row_json", "preview_json", "source_revision"}).AddRow("abc", 1, "agent", "{invalid", `{}`, 1).AddRow("def", 1, "agent", `{}`, `{}`, 1).RowError(1, fmt.Errorf("later row must not be materialized"))
+	expectWindowSummaryBytes(mock, 0)
 	mock.ExpectQuery("SELECT r.trace_id,r.span_count").WillReturnRows(rows)
 	mock.ExpectRollback()
 	result, e := s.traceWindow(context.Background(), "org", windowTestParams(), false)
 	require.ErrorContains(t, e, "invalid canonical recovery row")
+	require.Nil(t, result)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// An available summary must not make a complete raw window unreadable merely
+// because its denormalized canonical JSON is larger than the raw representation.
+func TestRecoveryWindowOversizedCanonicalRowsFallsBackToCompleteRawSnapshot(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	store := &oceanBaseStore{db: db, cfg: config{TablePrefix: "test"}}
+	mock.ExpectBegin()
+	expectProjectionMaintenance(mock, true, false)
+	mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"traces", "spans", "bytes", "max_bytes"}).AddRow(2, 2, 6000, 3000))
+	expectWindowSummaryBytes(mock, 0)
+	mock.ExpectQuery("SELECT r.trace_id,r.span_count").WillReturnRows(sqlmock.NewRows([]string{"trace_id", "span_count", "agent_uuid", "row_json", "preview_json", "source_revision"}).AddRow("abc", 1, "agent", `{"trace_id":"abc","input":"`+strings.Repeat("x", 8192)+`"}`, `{}`, 1))
+	mock.ExpectQuery("SELECT trace_id,").WillReturnRows(addWindowSpan(addWindowSpan(windowSpanRows(), "abc"), "def"))
+	mock.ExpectCommit()
+	result, err := store.traceWindowWithPayloadLimit(context.Background(), "org", windowTestParams(), false, traceWindowEnvelopeReserve+4096)
+	require.NoError(t, err)
+	data := result.(map[string]any)
+	require.Empty(t, data["rows"])
+	require.Len(t, data["raw"], 2)
+	meta := data["meta"].(map[string]any)
+	require.True(t, meta["raw"].(bool))
+	require.EqualValues(t, 0, meta["projectedTraceCount"])
+	require.EqualValues(t, 0, meta["omittedAgentTraceCount"])
+	require.EqualValues(t, 2, meta["rawTraceCount"])
+	require.EqualValues(t, 2, meta["rawSpanCount"])
+	require.Equal(t, "canonical_summary_budget", meta["recoveryReason"])
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestRecoveryWindowOversizedSummaryPreflightAvoidsLoadingCanonicalRows(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	store := &oceanBaseStore{db: db, cfg: config{TablePrefix: "test"}}
+	mock.ExpectBegin()
+	expectProjectionMaintenance(mock, true, false)
+	mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"traces", "spans", "bytes", "max_bytes"}).AddRow(2, 2, 6000, 3000))
+	mock.ExpectQuery("SELECT COALESCE\\(SUM\\(OCTET_LENGTH\\(p.row_json\\)").WillReturnRows(sqlmock.NewRows([]string{"summary_bytes"}).AddRow(8192))
+	mock.ExpectQuery("SELECT trace_id,").WillReturnRows(addWindowSpan(addWindowSpan(windowSpanRows(), "abc"), "def"))
+	mock.ExpectCommit()
+	result, err := store.traceWindowWithPayloadLimit(context.Background(), "org", windowTestParams(), false, traceWindowEnvelopeReserve+4096)
+	require.NoError(t, err)
+	data := result.(map[string]any)
+	require.Empty(t, data["rows"])
+	require.Len(t, data["raw"], 2)
+	meta := data["meta"].(map[string]any)
+	require.True(t, meta["raw"].(bool))
+	require.EqualValues(t, 0, meta["projectedTraceCount"])
+	require.Equal(t, "canonical_summary_budget", meta["recoveryReason"])
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestRecoveryWindowCombinedBudgetRetriesCompleteRawInSameSnapshot(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	store := &oceanBaseStore{db: db, cfg: config{TablePrefix: "test"}}
+	mock.ExpectBegin()
+	expectProjectionMaintenance(mock, true, false)
+	mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"traces", "spans", "bytes", "max_bytes"}).AddRow(2, 2, 6000, 3000))
+	expectWindowSummaryBytes(mock, 0)
+	mock.ExpectQuery("SELECT r.trace_id,r.span_count").WillReturnRows(sqlmock.NewRows([]string{"trace_id", "span_count", "agent_uuid", "row_json", "preview_json", "source_revision"}).AddRow("abc", 1, "agent", `{"trace_id":"abc","input":"`+strings.Repeat("y", 3000)+`"}`, `{}`, 1))
+	mock.ExpectQuery("SELECT trace_id,.*NOT EXISTS").WillReturnRows(addWindowSpan(windowSpanRows(), "def"))
+	mock.ExpectQuery("SELECT trace_id,").WillReturnRows(addWindowSpan(addWindowSpan(windowSpanRows(), "abc"), "def"))
+	mock.ExpectCommit()
+	result, err := store.traceWindowWithPayloadLimit(context.Background(), "org", windowTestParams(), false, traceWindowEnvelopeReserve+4096)
+	require.NoError(t, err)
+	data := result.(map[string]any)
+	require.Empty(t, data["rows"])
+	require.Len(t, data["raw"], 2)
+	meta := data["meta"].(map[string]any)
+	require.True(t, meta["raw"].(bool))
+	require.EqualValues(t, 0, meta["projectedTraceCount"])
+	require.EqualValues(t, 2, meta["rawSpanCount"])
+	require.Equal(t, "canonical_summary_budget", meta["recoveryReason"])
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestRecoveryWindowProjectionErrorsDoNotBecomeRawSuccess(t *testing.T) {
+	for _, stage := range []string{"preflight_sql", "canonical_sql_with_budget_message"} {
+		t.Run(stage, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			defer db.Close()
+			store := &oceanBaseStore{db: db, cfg: config{TablePrefix: "test"}}
+			failure := errors.New(errTraceWindowPayloadBudget.Error())
+			mock.ExpectBegin()
+			expectProjectionMaintenance(mock, true, false)
+			mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"traces", "spans", "bytes", "max_bytes"}).AddRow(1, 1, 3000, 3000))
+			if stage == "preflight_sql" {
+				mock.ExpectQuery("SELECT COALESCE").WillReturnError(failure)
+			} else {
+				expectWindowSummaryBytes(mock, 0)
+				mock.ExpectQuery("SELECT r.trace_id,r.span_count").WillReturnError(failure)
+			}
+			mock.ExpectRollback()
+			result, err := store.traceWindowWithPayloadLimit(context.Background(), "org", windowTestParams(), false, traceWindowEnvelopeReserve+4096)
+			require.ErrorIs(t, err, failure)
+			require.Nil(t, result)
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestRecoveryWindowRawBudgetStillFailsAfterSummaryFallback(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	store := &oceanBaseStore{db: db, cfg: config{TablePrefix: "test"}}
+	mock.ExpectBegin()
+	expectProjectionMaintenance(mock, true, false)
+	mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"traces", "spans", "bytes", "max_bytes"}).AddRow(1, 1, 3000, 3000))
+	expectWindowSummaryBytes(mock, 8192)
+	mock.ExpectQuery("SELECT trace_id,").WillReturnRows(addWindowSpan(windowSpanRows(), "abc"))
+	mock.ExpectRollback()
+	result, err := store.traceWindowWithPayloadLimit(context.Background(), "org", windowTestParams(), false, traceWindowEnvelopeReserve+128)
+	require.ErrorIs(t, err, errTraceWindowPayloadBudget)
 	require.Nil(t, result)
 	require.NoError(t, mock.ExpectationsWereMet())
 }

@@ -1,6 +1,7 @@
 package aivision
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/SigNoz/signoz/pkg/http/render"
@@ -9,6 +10,8 @@ import (
 
 const traceWindowEnvelopeReserve = 16 * 1024
 const traceWindowEntryReserve = 512
+
+var errTraceWindowPayloadBudget = errors.New("complete recovery window exceeds 256 MiB response; narrow the time range")
 
 // Use the renderer's serializer for exact escaping and number formatting.
 // Marshal only individual entries, never the complete response a second time.
@@ -22,7 +25,7 @@ func newTraceWindowWireBudget(limit int) *traceWindowWireBudget {
 
 func (b *traceWindowWireBudget) addBytes(size int) error {
 	if size < 0 || b.used > b.limit || size > b.limit-b.used {
-		return fmt.Errorf("complete recovery window exceeds 256 MiB response; narrow the time range")
+		return errTraceWindowPayloadBudget
 	}
 	b.used += size
 	return nil

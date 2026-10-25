@@ -78,6 +78,35 @@ func TestOceanBaseRecoveryWindowMergesAndFallsBack(t *testing.T) {
 	require.EqualValues(t, 5, meta["spanCount"])
 	require.EqualValues(t, 3, meta["rawSpanCount"])
 	require.Equal(t, "complete clean input", r["rows"].([]map[string]any)[0]["attributes.gen_ai.input.messages"])
+	// A denormalized summary can exceed the transfer budget even while every
+	// complete raw Span fits. The alternate representation must retain the same
+	// snapshot, all Trace/Span identities and explicit raw-only metadata.
+	originalRow := projection.Row
+	wide := map[string]any{}
+	require.NoError(t, json.Unmarshal(projection.Row, &wide))
+	wide["attributes.gen_ai.input.messages"] = strings.Repeat("full canonical IO ", 4096)
+	projection.Row, err = json.Marshal(wide)
+	require.NoError(t, err)
+	_, err = store.publishTraceProjection(ctx, org, projection)
+	require.NoError(t, err)
+	budgetResult, err := store.traceWindowWithPayloadLimit(ctx, org, p, false, traceWindowEnvelopeReserve+16384)
+	require.NoError(t, err)
+	bounded := budgetResult.(map[string]any)
+	require.Empty(t, bounded["rows"])
+	require.Len(t, bounded["raw"], 3)
+	boundedMeta := bounded["meta"].(map[string]any)
+	require.Equal(t, true, boundedMeta["raw"])
+	require.Equal(t, "canonical_summary_budget", boundedMeta["recoveryReason"])
+	require.EqualValues(t, 0, boundedMeta["projectedTraceCount"])
+	require.EqualValues(t, 0, boundedMeta["omittedAgentTraceCount"])
+	require.EqualValues(t, 5, boundedMeta["rawSpanCount"])
+	explicitRaw, err := store.traceWindow(ctx, org, p, true)
+	require.NoError(t, err)
+	require.Equal(t, explicitRaw.(map[string]any)["raw"], bounded["raw"])
+	projection.Row = originalRow
+	_, err = store.publishTraceProjection(ctx, org, projection)
+	require.NoError(t, err)
+
 	// The batch endpoint must preserve every single-source field, including
 	// source scope, revision, generation, precise timestamps and complete IO.
 	ids := []string{fmt.Sprintf("%032x", 3), fmt.Sprintf("%032x", 1), fmt.Sprintf("%032x", 2), "ffff"}
