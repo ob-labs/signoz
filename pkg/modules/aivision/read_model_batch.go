@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+
+	"github.com/SigNoz/signoz/pkg/ingest"
 )
 
 const projectionBatchLimit = 100
+const projectionPublishChunkLimit = 25
 const projectionBatchPayloadLimit = 16 * 1024 * 1024
 
 func (s *oceanBaseStore) traceSourceBatch(ctx context.Context, org, space string, ids []string) (any, error) {
@@ -39,22 +42,55 @@ func (s *oceanBaseStore) publishTraceBatch(ctx context.Context, org string, item
 		}
 		seen[key] = true
 	}
-	// Each item retains its own source-revision CAS. An interrupted batch may
-	// have committed earlier items; retrying them is safe and rechecks revision.
+	// Earlier chunks may remain committed if a later chunk fails. Each chunk
+	// reacquires the fence and retains every per-Trace revision/scope CAS.
 	data := make([]any, 0, len(items))
-	for _, p := range items {
-		result, err := s.publishTraceProjection(ctx, org, p)
+	for offset := 0; offset < len(items); offset += projectionPublishChunkLimit {
+		end := offset + projectionPublishChunkLimit
+		if end > len(items) {
+			end = len(items)
+		}
+		committed, err := s.publishTraceChunk(ctx, org, items[offset:end])
 		if err != nil {
 			return nil, err
 		}
-		receipt, ok := result.(map[string]any)
-		if !ok {
-			return nil, fmt.Errorf("invalid publication receipt")
+		// No tentative success escapes a failed transaction/commit.
+		data = append(data, committed...)
+	}
+	return map[string]any{"supported": true, "contract": "native-trace-publish-batch-v1", "data": data}, nil
+}
+
+func (s *oceanBaseStore) publishTraceChunk(ctx context.Context, org string, items []traceProjection) ([]any, error) {
+	if len(items) < 1 || len(items) > projectionPublishChunkLimit {
+		return nil, fmt.Errorf("invalid publication chunk count")
+	}
+	tx, err := s.beginReadModel(ctx, false)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	enabled, generation, err := ingest.LockProjectionMaintenance(ctx, tx, s.cfg.TablePrefix)
+	if err != nil {
+		return nil, err
+	}
+	data := make([]any, 0, len(items))
+	for _, p := range items {
+		receipt := readModelUnsupported("projection_maintenance_unavailable")
+		if enabled {
+			receipt, err = s.publishTraceProjectionInTx(ctx, tx, org, p, generation)
+			if err != nil {
+				return nil, err
+			}
 		}
 		receipt["trace_id"] = p.TraceID
 		data = append(data, receipt)
 	}
-	return map[string]any{"supported": true, "contract": "native-trace-publish-batch-v1", "data": data}, nil
+	if enabled {
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+	}
+	return data, nil
 }
 
 func (h *handler) projectionBatchAction(r *http.Request, ctx context.Context, org, action string) (any, error) {

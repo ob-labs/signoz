@@ -201,6 +201,54 @@ func TestOceanBaseTraceReadModel(t *testing.T) {
 	planJSON, _ := json.Marshal(plans)
 	t.Logf("EXPLAIN typed summary candidates: %s", planJSON)
 	require.NotEmpty(t, plans)
+	t.Run("batch_publication_commits_bounded_chunks_with_per_trace_CAS", func(t *testing.T) {
+		const batchScope = "batch-publication"
+		var spans []tracePageIntegrationSpan
+		for i := 1; i <= 26; i++ {
+			root, child := fixture.pair(batchScope, i)
+			spans = append(spans, root, child)
+		}
+		fixture.insert(t, spans)
+		enrolled, err := store.backfillTraceSources(ctx, org, batchScope, 500)
+		require.NoError(t, err)
+		require.EqualValues(t, 26, enrolled.(map[string]any)["enrolled"])
+		items := make([]traceProjection, 0, 26)
+		for i := 1; i <= 26; i++ {
+			p := validProjection()
+			p.MaintenanceGeneration = integrationProjectionGeneration(t, db, prefix)
+			p.SpaceID, p.TraceID = batchScope, fmt.Sprintf("%032x", i)
+			p.UserID, p.AgentProduct, p.Period = "subject", "Codex", start.UnixMilli()
+			p.Row, err = json.Marshal(map[string]any{"trace_id": p.TraceID, "start_time_unix_nano": fmt.Sprint(start.UnixNano())})
+			require.NoError(t, err)
+			items = append(items, p)
+		}
+		items[25].SourceRevision = 2 // The real source remains revision1 and dirty.
+		published, err := store.publishTraceBatch(ctx, org, items)
+		require.NoError(t, err)
+		data := published.(map[string]any)["data"].([]any)
+		require.Len(t, data, 26)
+		for i, item := range items {
+			r := data[i].(map[string]any)
+			require.Equal(t, item.TraceID, r["trace_id"])
+			if i < 25 {
+				require.Equal(t, true, r["published"])
+			} else {
+				require.Equal(t, "source_revision_changed", r["reason"])
+			}
+		}
+		var projectionCount, clean, revisionOne int
+		require.NoError(t, db.QueryRow("SELECT COUNT(*) FROM "+store.readModelTable("trace_projections")+" WHERE org_id=? AND space_id=?", org, batchScope).Scan(&projectionCount))
+		require.Equal(t, 25, projectionCount)
+		require.NoError(t, db.QueryRow("SELECT SUM(NOT dirty),SUM(source_revision=1) FROM "+store.readModelTable("trace_sources")+" WHERE org_id=? AND space_id=?", org, batchScope).Scan(&clean, &revisionOne))
+		require.Equal(t, 25, clean)
+		require.Equal(t, 26, revisionOne)
+		foreign, err := store.publishTraceBatch(ctx, "other-org", items[:1])
+		require.NoError(t, err)
+		require.Equal(t, "source_not_enrolled", foreign.(map[string]any)["data"].([]any)[0].(map[string]any)["reason"])
+		require.NoError(t, db.QueryRow("SELECT COUNT(*) FROM "+store.readModelTable("trace_projections")+" WHERE org_id=?", "other-org").Scan(&projectionCount))
+		require.Zero(t, projectionCount)
+	})
+
 	// Correct both previously stored spans via the real production ingest path.
 	trace := fmt.Sprintf("%032x", 1)
 	newStart := start.Add(5 * time.Minute).UnixNano()

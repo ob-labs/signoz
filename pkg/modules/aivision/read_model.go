@@ -486,13 +486,29 @@ func (s *oceanBaseStore) publishTraceProjection(ctx context.Context, org string,
 	if !enabled {
 		return readModelUnsupported("projection_maintenance_unavailable"), nil
 	}
+	receipt, err := s.publishTraceProjectionInTx(ctx, tx, org, p, generation)
+	if err != nil {
+		return nil, err
+	}
+	if receipt["published"] != true {
+		return receipt, nil
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return receipt, nil
+}
+
+// The caller must hold the shared maintenance fence in this write transaction.
+// Single and batch publication use the identical source scope/revision CAS.
+func (s *oceanBaseStore) publishTraceProjectionInTx(ctx context.Context, tx *sql.Tx, org string, p traceProjection, generation int64) (map[string]any, error) {
 	if p.MaintenanceGeneration != generation {
 		return readModelUnsupported("maintenance_generation_changed"), nil
 	}
 	var revision int64
 	var sourceUser, sourceProduct string
 	var scopeValid bool
-	err = tx.QueryRowContext(ctx, "SELECT source_revision,user_id,agent_product,scope_valid FROM "+s.readModelTable("trace_sources")+" WHERE org_id=? AND space_id=? AND trace_id=? FOR UPDATE", org, p.SpaceID, p.TraceID).Scan(&revision, &sourceUser, &sourceProduct, &scopeValid)
+	err := tx.QueryRowContext(ctx, "SELECT source_revision,user_id,agent_product,scope_valid FROM "+s.readModelTable("trace_sources")+" WHERE org_id=? AND space_id=? AND trace_id=? FOR UPDATE", org, p.SpaceID, p.TraceID).Scan(&revision, &sourceUser, &sourceProduct, &scopeValid)
 	if err == sql.ErrNoRows {
 		return readModelUnsupported("source_not_enrolled"), nil
 	}
@@ -528,9 +544,6 @@ func (s *oceanBaseStore) publishTraceProjection(ctx context.Context, org string,
 		return nil, err
 	}
 	if _, err := tx.ExecContext(ctx, "UPDATE "+s.readModelTable("trace_sources")+" SET dirty=FALSE WHERE org_id=? AND space_id=? AND trace_id=? AND source_revision=?", org, p.SpaceID, p.TraceID, p.SourceRevision); err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return map[string]any{"supported": true, "published": true, "source_revision": revision, "maintenance_generation": generation}, nil

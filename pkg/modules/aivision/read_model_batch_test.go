@@ -34,12 +34,12 @@ func TestProjectionBatchKeepsPerTraceCASAndReceipts(t *testing.T) {
 	first.AgentProduct = "product"
 	second := first
 	second.TraceID = "abc"
+	mock.ExpectBegin()
+	expectProjectionMaintenance(mock, true, true)
 	for _, p := range []traceProjection{first, second} {
-		mock.ExpectBegin()
-		expectProjectionMaintenance(mock, true, true)
 		mock.ExpectQuery("SELECT source_revision,user_id,agent_product,scope_valid").WithArgs("org", p.SpaceID, p.TraceID).WillReturnRows(sqlmock.NewRows([]string{"revision", "user", "product", "valid"}).AddRow(2, "owner", "product", true))
-		mock.ExpectRollback()
 	}
+	mock.ExpectCommit()
 	// The second row is validated before the first is attempted, including its
 	// canonical identity. Make it valid while preserving a distinct ID.
 	second.Row = []byte(`{"trace_id":"abc","start_time_unix_nano":"100000000"}`)
