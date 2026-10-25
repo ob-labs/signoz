@@ -39,6 +39,7 @@ type Server struct {
 	modelID       string
 	mtx           sync.RWMutex
 	stopChan      chan struct{}
+	stopOnce      sync.Once
 	healthyC      chan struct{}
 }
 
@@ -95,8 +96,10 @@ func (server *Server) Healthy() <-chan struct{} {
 }
 
 func (server *Server) Stop(ctx context.Context) error {
-	server.openfgaServer.Close()
-	close(server.stopChan)
+	server.stopOnce.Do(func() {
+		server.openfgaServer.Close()
+		close(server.stopChan)
+	})
 	return nil
 }
 
