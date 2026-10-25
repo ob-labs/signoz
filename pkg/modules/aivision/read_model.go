@@ -644,9 +644,15 @@ func (s *oceanBaseStore) backfillTraceSourceChunk(ctx context.Context, org, spac
 		if err != nil {
 			return progress, "", err
 		}
+		// Ingest and publication take this same fence before changing source
+		// revisions. Validate the complete bounded page, then lock/upsert all of
+		// its sources in one statement instead of two round trips per Trace.
+		values := make([]any, 0, len(rows)*8)
+		placeholders := make([]string, 0, len(rows))
+		after := progress.after
 		for _, row := range rows {
 			id := fmt.Sprint(row["trace_id"])
-			if !readModelTraceID.MatchString(id) || id <= progress.after {
+			if !readModelTraceID.MatchString(id) || id <= after {
 				return progress, "", fmt.Errorf("invalid historical trace_id")
 			}
 			min, minErr := asInt64(row["min_timestamp"])
@@ -662,20 +668,19 @@ func (s *oceanBaseStore) backfillTraceSourceChunk(ctx context.Context, org, spac
 			if minErr != nil || maxErr != nil || min < 0 || max < min || !userOK || !productOK || !validOK {
 				return progress, "", fmt.Errorf("invalid historical trace summary")
 			}
-			if err := ingest.LockTraceSource(ctx, tx, s.cfg.TablePrefix, org, space, id); err != nil {
+			placeholders = append(placeholders, "(?,?,?,1,?,?,?,?,?,TRUE)")
+			values = append(values, org, space, id, min, max, user, product, valid)
+			after = id
+		}
+		if len(rows) > 0 {
+			// New sources begin at revision 1, exactly matching the former
+			// revision-0 placeholder plus increment. Existing sources advance
+			// exactly once; stale publishers still fail their revision CAS.
+			query := "INSERT INTO " + s.readModelTable("trace_sources") + " (org_id,space_id,trace_id,source_revision,min_timestamp,max_timestamp,user_id,agent_product,scope_valid,dirty) VALUES " + strings.Join(placeholders, ",") + " ON DUPLICATE KEY UPDATE source_revision=source_revision+1,dirty=TRUE,min_timestamp=VALUES(min_timestamp),max_timestamp=VALUES(max_timestamp),user_id=VALUES(user_id),agent_product=VALUES(agent_product),scope_valid=VALUES(scope_valid)"
+			if _, err := tx.ExecContext(ctx, query, values...); err != nil {
 				return progress, "", err
 			}
-			// Ingest takes this same maintenance fence before every raw write,
-			// including OFF writers. This bounded group page therefore stays
-			// stable until commit; external SQL writers must first suspend the
-			// projection lifecycle. Reuse it instead of five scalar raw scans.
-			query := "UPDATE " + s.readModelTable("trace_sources") + " SET source_revision=source_revision+1,dirty=TRUE,min_timestamp=?,max_timestamp=?,user_id=?,agent_product=?,scope_valid=? WHERE org_id=? AND space_id=? AND trace_id=?"
-			_, err := tx.ExecContext(ctx, query, min, max, user, product, valid, org, space, id)
-			if err != nil {
-				return progress, "", err
-			}
-			progress.after = id
-			progress.enrolled++
+			progress.after, progress.enrolled = after, len(rows)
 		}
 		progress.complete = len(rows) < limit
 		if _, err := tx.ExecContext(ctx, "UPDATE "+coverage+" SET after_trace_id=?,complete=? WHERE org_id=? AND space_id=?", progress.after, progress.complete, org, space); err != nil {

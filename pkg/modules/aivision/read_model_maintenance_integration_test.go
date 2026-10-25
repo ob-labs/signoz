@@ -199,9 +199,54 @@ func TestOceanBaseProjectionMaintenanceConcurrency(t *testing.T) {
 			require.Equal(t, true, fresh.(map[string]any)["published"])
 		})
 	}
+	t.Run("batch_enrollment_preserves_existing_revisions_and_scope", func(t *testing.T) {
+		batchCtx, stop := context.WithTimeout(context.Background(), 15*time.Second)
+		defer stop()
+		const scope = "batch-revisions"
+		var batchSpans []tracePageIntegrationSpan
+		for i := 1; i <= 2; i++ {
+			root, child := fixture.pair(scope, i)
+			batchSpans = append(batchSpans, root, child)
+		}
+		fixture.insert(t, batchSpans)
+		id := fmt.Sprintf("%032x", 1)
+		seed := "INSERT INTO " + store.readModelTable("trace_sources") + " (org_id,space_id,trace_id,source_revision,user_id,agent_product,scope_valid,min_timestamp,max_timestamp,dirty) VALUES (?,?,?,?,'old-owner','old-product',FALSE,0,0,FALSE)"
+		_, err := db.ExecContext(batchCtx, seed, org, scope, id, 7)
+		require.NoError(t, err)
+		_, err = db.ExecContext(batchCtx, seed, "other-org", scope, id, 21)
+		require.NoError(t, err)
+		value, err := store.backfillTraceSources(batchCtx, org, scope, 25)
+		require.NoError(t, err)
+		require.EqualValues(t, 2, value.(map[string]any)["enrolled"])
+		require.Equal(t, true, value.(map[string]any)["complete"])
+		for i, expected := range []int64{8, 1} {
+			var revision, min, max int64
+			var user, product string
+			var valid, dirty bool
+			err = db.QueryRowContext(batchCtx, "SELECT source_revision,min_timestamp,max_timestamp,user_id,agent_product,scope_valid,dirty FROM "+store.readModelTable("trace_sources")+" WHERE org_id=? AND space_id=? AND trace_id=?", org, scope, fmt.Sprintf("%032x", i+1)).Scan(&revision, &min, &max, &user, &product, &valid, &dirty)
+			require.NoError(t, err)
+			require.Equal(t, expected, revision)
+			require.Equal(t, start.UnixNano(), min)
+			require.Equal(t, min+1, max)
+			require.Equal(t, "subject", user)
+			require.Equal(t, "Codex", product)
+			require.True(t, valid)
+			require.True(t, dirty)
+		}
+		var untouched int64
+		require.NoError(t, db.QueryRowContext(batchCtx, "SELECT source_revision FROM "+store.readModelTable("trace_sources")+" WHERE org_id=? AND space_id=? AND trace_id=?", "other-org", scope, id).Scan(&untouched))
+		require.EqualValues(t, 21, untouched)
+		stale := projection
+		stale.SpaceID, stale.SourceRevision = scope, 7
+		stale.MaintenanceGeneration = integrationProjectionGeneration(t, db, prefix)
+		published, err := store.publishTraceProjection(batchCtx, org, stale)
+		require.NoError(t, err)
+		require.Equal(t, readModelUnsupported("source_revision_changed"), published)
+	})
+
 	var rawCount int
 	require.NoError(t, db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+store.tracesTable()).Scan(&rawCount))
-	require.Equal(t, 2*count, rawCount)
+	require.Equal(t, 2*count+4, rawCount)
 }
 
 func waitForMaintenanceFenceQuery(ctx context.Context, db *sql.DB, prefix string) error {

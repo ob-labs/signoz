@@ -34,6 +34,10 @@ type Config struct {
 	// ProjectionMaintenanceDisabled is the single emergency ingest control.
 	// The zero value enables standard revision tracking.
 	ProjectionMaintenanceDisabled bool
+	// ProjectionMaintenanceManaged is internal wiring: the matching data-plane
+	// provider already owns initialization and bounded retry on this DSN/prefix.
+	// Standalone ingest keeps its zero-value bootstrap behavior.
+	ProjectionMaintenanceManaged bool
 	// DSN of the OceanBase/seekdb telemetry database (MySQL protocol).
 	DSN string
 	// TablePrefix of the signoz.* flat tables, e.g. "signoz".
@@ -115,7 +119,7 @@ func AddToRouter(router *mux.Router, cfg Config, logger *slog.Logger) error {
 		return err
 	}
 	initCtx, initCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	if err := InitializeTraceReadModelMaintenance(initCtx, db, cfg.TablePrefix, !cfg.ProjectionMaintenanceDisabled); err != nil {
+	if err := initializeProjectionMaintenance(initCtx, db, cfg); err != nil {
 		logger.Warn("projection maintenance unavailable; raw ingestion retained with shared eligibility fence", "error", err)
 	}
 	initCancel()
@@ -134,6 +138,16 @@ func AddToRouter(router *mux.Router, cfg Config, logger *slog.Logger) error {
 		slog.String("routes", "/v1/traces,/v1/logs,/v1/metrics"),
 		slog.String("table_prefix", cfg.TablePrefix))
 	return nil
+}
+
+// A managed provider is the sole lifecycle owner, including failed migration
+// retries. Repeating its mutating initialization here could revoke eligibility
+// after a successful provider startup without scheduling a new retry.
+func initializeProjectionMaintenance(ctx context.Context, db *sql.DB, cfg Config) error {
+	if cfg.ProjectionMaintenanceManaged {
+		return nil
+	}
+	return InitializeTraceReadModelMaintenance(ctx, db, cfg.TablePrefix, !cfg.ProjectionMaintenanceDisabled)
 }
 
 func (ep *endpoint) authorized(r *http.Request) bool {

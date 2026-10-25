@@ -84,6 +84,8 @@ func NewServer(config signoz.Config, signoz *signoz.SigNoz) (*Server, error) {
 	// The gateway forwards verified telemetry to the configured data plane.
 	// Ingest stays disabled unless an internal key is configured.
 	if err := ingest.AddToRouter(r, ingest.Config{
+		// The OceanBase provider uses these same config values and owns retries.
+		ProjectionMaintenanceManaged:  config.TelemetryStore.Provider == "oceanbase",
 		ProjectionMaintenanceDisabled: !ingest.ProjectionMaintenanceEnabled(),
 		DSN:                           config.TelemetryStore.OceanBase.DSN,
 		TablePrefix:                   config.TelemetryStore.OceanBase.TablePrefix,

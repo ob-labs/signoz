@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -92,20 +93,24 @@ func expectMaintenanceChunkStart(mock sqlmock.Sqlmock, after string, limit, firs
 	mock.ExpectQuery("SELECT trace_id,MIN\\(timestamp\\)").WithArgs("org", "space", after, limit).WillReturnRows(maintenanceAggregateRows(first, count))
 }
 
-func expectMaintenanceSource(mock sqlmock.Sqlmock, index int, delay time.Duration, failure error) {
-	id := fmt.Sprintf("%032x", index)
-	mock.ExpectExec("INSERT INTO .*trace_sources").WithArgs("org", "space", id).WillReturnResult(sqlmock.NewResult(0, 1))
-	// A scalar raw-data subquery would fail this expectation: the already-fenced
-	// group page must supply each exact physical summary without rereading raw.
-	query := "UPDATE `test_trace_sources` SET source_revision=source_revision+1,dirty=TRUE,min_timestamp=?,max_timestamp=?,user_id=?,agent_product=?,scope_valid=? WHERE org_id=? AND space_id=? AND trace_id=?"
-	expect := mock.ExpectExec(regexp.QuoteMeta(query)).WithArgs(int64(100+index), int64(200+index), "owner", "product", true, "org", "space", id)
+func expectMaintenanceSources(mock sqlmock.Sqlmock, first, count int, delay time.Duration, failure error) {
+	values := make([]driver.Value, 0, count*8)
+	placeholders := make([]string, 0, count)
+	for index := first; index < first+count; index++ {
+		placeholders = append(placeholders, "(?,?,?,1,?,?,?,?,?,TRUE)")
+		values = append(values, "org", "space", fmt.Sprintf("%032x", index), int64(100+index), int64(200+index), "owner", "product", true)
+	}
+	query := "INSERT INTO `test_trace_sources` (org_id,space_id,trace_id,source_revision,min_timestamp,max_timestamp,user_id,agent_product,scope_valid,dirty) VALUES " + strings.Join(placeholders, ",") + " ON DUPLICATE KEY UPDATE source_revision=source_revision+1,dirty=TRUE,min_timestamp=VALUES(min_timestamp),max_timestamp=VALUES(max_timestamp),user_id=VALUES(user_id),agent_product=VALUES(agent_product),scope_valid=VALUES(scope_valid)"
+	expect := mock.ExpectExec(regexp.QuoteMeta(query)).WithArgs(values...)
 	if delay > 0 {
 		expect.WillDelayFor(delay)
 	}
 	if failure != nil {
 		expect.WillReturnError(failure)
 	} else {
-		expect.WillReturnResult(sqlmock.NewResult(0, 1))
+		// MySQL may report two affected rows per updated source. Enrollment
+		// counts input identities, not engine-specific affected-row totals.
+		expect.WillReturnResult(sqlmock.NewResult(0, int64(count*2)))
 	}
 }
 
@@ -133,13 +138,11 @@ func TestBackfillCommitsAtMost25AndRereadsSharedCursor(t *testing.T) {
 	s := &oceanBaseStore{db: db, cfg: config{TablePrefix: "test"}}
 	expectMaintenanceBackfillProbe(mock, "", false)
 	expectMaintenanceChunkStart(mock, "", 25, 1, 25)
-	for i := 1; i <= 25; i++ {
-		expectMaintenanceSource(mock, i, 0, nil)
-	}
+	expectMaintenanceSources(mock, 1, 25, 0, nil)
 	expectMaintenanceChunkCommit(mock, 25, false)
 	// Another maintainer advanced the persisted cursor between transactions.
 	expectMaintenanceChunkStart(mock, fmt.Sprintf("%032x", 28), 1, 29, 1)
-	expectMaintenanceSource(mock, 29, 0, nil)
+	expectMaintenanceSources(mock, 29, 1, 0, nil)
 	expectMaintenanceChunkCommit(mock, 29, false)
 	result, err := s.backfillTraceSources(context.Background(), "org", "space", 26)
 	require.NoError(t, err)
@@ -157,9 +160,8 @@ func TestBackfillChunkFailureDoesNotAdvanceCursor(t *testing.T) {
 	s := &oceanBaseStore{db: db, cfg: config{TablePrefix: "test"}}
 	expectMaintenanceBackfillProbe(mock, "", false)
 	expectMaintenanceChunkStart(mock, "", 25, 1, 2)
-	expectMaintenanceSource(mock, 1, 0, nil)
-	failure := errors.New("source update failed")
-	expectMaintenanceSource(mock, 2, 0, failure)
+	failure := errors.New("source batch failed")
+	expectMaintenanceSources(mock, 1, 2, 0, failure)
 	mock.ExpectRollback()
 	_, err = s.backfillTraceSources(context.Background(), "org", "space", 500)
 	require.ErrorIs(t, err, failure)
@@ -175,9 +177,7 @@ func TestBackfillStopsOnMaintenanceTransitionBetweenChunks(t *testing.T) {
 			s := &oceanBaseStore{db: db, cfg: config{TablePrefix: "test"}}
 			expectMaintenanceBackfillProbe(mock, "", false)
 			expectMaintenanceChunkStart(mock, "", 25, 1, 25)
-			for i := 1; i <= 25; i++ {
-				expectMaintenanceSource(mock, i, 0, nil)
-			}
+			expectMaintenanceSources(mock, 1, 25, 0, nil)
 			expectMaintenanceChunkCommit(mock, 25, false)
 			mock.ExpectBegin()
 			mock.ExpectQuery("SELECT enabled,generation,schema_version FROM.*FOR UPDATE").WillReturnRows(sqlmock.NewRows([]string{"enabled", "generation", "schema_version"}).AddRow(enabled, 2, 1))
@@ -201,17 +201,30 @@ func TestBackfillYieldsCommittedProgressAfterSoftWorkBudget(t *testing.T) {
 	s := &oceanBaseStore{db: db, cfg: config{TablePrefix: "test"}}
 	expectMaintenanceBackfillProbe(mock, "", false)
 	expectMaintenanceChunkStart(mock, "", 25, 1, 25)
-	for i := 1; i <= 25; i++ {
-		delay := time.Duration(0)
-		if i == 1 {
-			delay = 2100 * time.Millisecond
-		}
-		expectMaintenanceSource(mock, i, delay, nil)
-	}
+	expectMaintenanceSources(mock, 1, 25, 2100*time.Millisecond, nil)
 	expectMaintenanceChunkCommit(mock, 25, false)
 	result, err := s.backfillTraceSources(context.Background(), "org", "space", 500)
 	require.NoError(t, err)
 	require.Equal(t, 25, result.(map[string]any)["enrolled"])
 	require.Equal(t, false, result.(map[string]any)["complete"])
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestBackfillBatchValidatesTheWholePageBeforeWriting(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	s := &oceanBaseStore{db: db, cfg: config{TablePrefix: "test"}}
+	expectMaintenanceBackfillProbe(mock, "", false)
+	mock.ExpectBegin()
+	expectProjectionMaintenance(mock, true, true)
+	mock.ExpectExec("INSERT IGNORE INTO .*trace_projection_coverage").WithArgs("org", "space").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery("SELECT after_trace_id,complete FROM .*FOR UPDATE").WithArgs("org", "space").WillReturnRows(maintenanceCoverageRows("", false))
+	rows := maintenanceAggregateRows(1, 1).AddRow(fmt.Sprintf("%032x", 2), int64(200), int64(100), "owner", "product", true)
+	mock.ExpectQuery("SELECT trace_id,MIN\\(timestamp\\)").WithArgs("org", "space", "", 25).WillReturnRows(rows)
+	// The invalid second row must not cause any source write or cursor change.
+	mock.ExpectRollback()
+	_, err = s.backfillTraceSources(context.Background(), "org", "space", 500)
+	require.ErrorContains(t, err, "invalid historical trace summary")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
