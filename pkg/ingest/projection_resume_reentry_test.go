@@ -48,6 +48,8 @@ func TestResumePartialSchemaZeroAcceptsIntentOnceAndNewOffWins(t *testing.T) {
 	expectProjectionCleanupChunk(mock, "trace_sources", 4, 256, true)
 	expectProjectionCleanupChunk(mock, "trace_sources", 4, 18, true)
 	expectProjectionCleanupChunk(mock, "trace_projection_coverage", 4, 3, true)
+	expectProjectionCleanupChunk(mock, "call_statistics", 4, 0, true)
+	expectProjectionCleanupChunk(mock, "trace_statistics", 4, 0, true)
 	expectProjectionCleanupFinish(mock, 4, true)
 	expectProjectionCleanupRelease(mock)
 	err := ResumeProjectionMaintenance(context.Background(), db, "test")
@@ -90,6 +92,7 @@ func TestResumeReadyWithRemovedDerivedTablesRepairsUnderSingleIntent(t *testing.
 	for _, suffix := range []string{"trace_projections", "trace_sources", "trace_projection_coverage"} {
 		expectProjectionCleanupChunk(mock, suffix, 8, 0, false)
 	}
+	expectOptionalStatisticsCleanupAbsent(mock, 8)
 	expectProjectionCleanupFinish(mock, 8, false)
 	expectProjectionCleanupRelease(mock)
 	if err := ResumeProjectionMaintenance(ctx, db, "test"); err != nil {

@@ -71,7 +71,7 @@ func New(ctx context.Context, settings factory.ProviderSettings, config telemetr
 	// A derived-schema failure must not stop the raw telemetry service. The
 	// durable migration fence remains ineligible until retry finishes.
 	initCtx, initCancel := context.WithTimeout(ctx, 2*time.Minute)
-	err = ingest.InitializeTraceReadModelMaintenance(initCtx, db, config.OceanBase.TablePrefix, ingest.ProjectionMaintenanceEnabled())
+	err = initializeProjectionModels(initCtx, db, config.OceanBase.TablePrefix)
 	initCancel()
 	if err != nil && settings.Logger != nil {
 		settings.Logger.Warn("projection maintenance initialization failed; raw queries remain available", "error", err)
@@ -82,7 +82,7 @@ func New(ctx context.Context, settings factory.ProviderSettings, config telemetr
 		retryCtx, retryCancel := context.WithCancel(ctx)
 		result.maintenanceCancel = retryCancel
 		go retryProjectionMaintenance(retryCtx, 5*time.Second, func(attemptCtx context.Context) error {
-			attemptErr := ingest.InitializeTraceReadModelMaintenance(attemptCtx, db, config.OceanBase.TablePrefix, ingest.ProjectionMaintenanceEnabled())
+			attemptErr := initializeProjectionModels(attemptCtx, db, config.OceanBase.TablePrefix)
 			if attemptErr != nil && settings.Logger != nil {
 				settings.Logger.Warn("retry projection maintenance initialization", "error", attemptErr)
 			}
@@ -90,6 +90,19 @@ func New(ctx context.Context, settings factory.ProviderSettings, config telemetr
 		})
 	}
 	return result, nil
+}
+
+func initializeProjectionModels(ctx context.Context, db *sql.DB, prefix string) error {
+	if err := ingest.InitializeTraceReadModelMaintenance(ctx, db, prefix, ingest.ProjectionMaintenanceEnabled()); err != nil {
+		return err
+	}
+	if !ingest.ProjectionMaintenanceEnabled() {
+		return nil
+	}
+	// The grouping-sets execution contract requires OceanBase 4.4 or later. Both Community and
+	// Enterprise editions use the same optional capability; seekdb retains its
+	// existing complete metrics-window contract.
+	return ingest.InitializeTraceStatistics(ctx, db, prefix)
 }
 
 func (p *provider) QueryContext(ctx context.Context, query string, args ...any) (telemetrystore.Rows, error) {

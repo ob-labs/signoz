@@ -80,6 +80,7 @@ func TestResumeProjectionMaintenanceRebuildsDerivedOnly(t *testing.T) {
 	for _, suffix := range []string{"trace_projections", "trace_sources", "trace_projection_coverage"} {
 		expectProjectionCleanupChunk(mock, suffix, 3, 20, false)
 	}
+	expectOptionalStatisticsCleanupAbsent(mock, 3)
 	expectProjectionCleanupFinish(mock, 3, false)
 	expectProjectionCleanupRelease(mock)
 	if err := ResumeProjectionMaintenance(context.Background(), db, "test"); err != nil {

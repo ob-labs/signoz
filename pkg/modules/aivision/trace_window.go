@@ -103,6 +103,14 @@ func (s *oceanBaseStore) traceWindow(ctx context.Context, org string, p nativeLi
 }
 
 func (s *oceanBaseStore) traceWindowWithPayloadLimit(ctx context.Context, org string, p nativeListParams, rawOnly bool, payloadLimit int) (any, error) {
+	return s.traceWindowRepresentation(ctx, org, p, rawOnly, payloadLimit, false)
+}
+
+func (s *oceanBaseStore) traceMetricsWindow(ctx context.Context, org string, p nativeListParams, rawOnly bool) (any, error) {
+	return s.traceWindowRepresentation(ctx, org, p, rawOnly, traceWindowPayloadLimit, true)
+}
+
+func (s *oceanBaseStore) traceWindowRepresentation(ctx context.Context, org string, p nativeListParams, rawOnly bool, payloadLimit int, metricsOnly bool) (any, error) {
 	scope, args, err := traceWindowScope(org, p, "")
 	if err != nil {
 		return nil, err
@@ -113,8 +121,9 @@ func (s *oceanBaseStore) traceWindowWithPayloadLimit(ctx context.Context, org st
 	}
 	defer tx.Rollback()
 	useProjection := false
+	var projectionGeneration int64
 	if !rawOnly {
-		useProjection, _, err = ingest.ReadProjectionMaintenance(ctx, tx, s.cfg.TablePrefix)
+		useProjection, projectionGeneration, err = ingest.ReadProjectionMaintenance(ctx, tx, s.cfg.TablePrefix)
 		if err != nil {
 			return nil, err
 		}
@@ -155,7 +164,7 @@ func (s *oceanBaseStore) traceWindowWithPayloadLimit(ctx context.Context, org st
 		recoveryReason = "canonical_summary_budget"
 	}
 	candidate := "SELECT trace_id,COUNT(*) AS span_count FROM " + s.tracesTable() + " WHERE " + scope + " GROUP BY BINARY trace_id,trace_id"
-	if useProjection {
+	if useProjection && !metricsOnly {
 		// Canonical rows duplicate IO and may exceed the compact raw form. This
 		// conservative estimate avoids loading a known-large representation.
 		// It includes all clean physical candidates which the row query carries;
@@ -176,7 +185,14 @@ func (s *oceanBaseStore) traceWindowWithPayloadLimit(ctx context.Context, org st
 	if useProjection {
 		// r is the distinct raw candidate set, preventing a stale/orphan projection
 		// from inventing rows when source reconciliation is still catching up.
-		query := "SELECT r.trace_id,r.span_count,p.agent_uuid,p.row_json,p.preview_json,p.source_revision FROM (" + candidate + ") r JOIN " + cleanRelation
+		columns := "r.trace_id,r.span_count,p.agent_uuid,p.row_json,p.preview_json,p.source_revision"
+		if metricsOnly {
+			// Stream one canonical row at a time and discard content before its
+			// exact wire budget is measured. Full IO bytes do not predict the
+			// metrics representation and must not force an all-raw fallback.
+			columns = "r.trace_id,r.span_count,p.agent_uuid,p.row_json,p.source_revision"
+		}
+		query := "SELECT " + columns + " FROM (" + candidate + ") r JOIN " + cleanRelation
 		values := append(append([]any{}, args...), cleanArgs...)
 		seen := map[string]bool{}
 		err = scanReadModelRowsEach(ctx, tx, query, values, func(record map[string]any) error {
@@ -198,11 +214,16 @@ func (s *oceanBaseStore) traceWindowWithPayloadLimit(ctx context.Context, org st
 			if e != nil || row["trace_id"] != id {
 				return fmt.Errorf("invalid canonical recovery row")
 			}
-			preview, e := tracePageJSON(record["preview_json"])
-			if e != nil {
-				return fmt.Errorf("invalid canonical recovery preview")
+			if metricsOnly {
+				row = traceMetricsWindowRow(row)
+			} else {
+				preview, e := tracePageJSON(record["preview_json"])
+				if e != nil {
+					return fmt.Errorf("invalid canonical recovery preview")
+				}
+				row["ioPreview"] = preview
 			}
-			row["ioPreview"], row["sourceRevision"] = preview, record["source_revision"]
+			row["sourceRevision"] = record["source_revision"]
 			if err := wireBudget.addRow(row); err != nil {
 				return err
 			}
@@ -277,6 +298,17 @@ func (s *oceanBaseStore) traceWindowWithPayloadLimit(ctx context.Context, org st
 		return nil, fmt.Errorf("incomplete canonical recovery window")
 	}
 	meta := map[string]any{"from": p.From, "to": p.To, "space_id": p.SpaceID, "user": p.User, "agent_product": p.AgentProduct, "agent_uuid": p.AgentUUID, "projection_context": p.ProjectionContext, "raw": !useProjection, "traceCount": traceCount, "spanCount": spanCount, "rawSpanCount": rawSpanCount, "projectedTraceCount": cleanCount, "rawTraceCount": len(details), "omittedAgentTraceCount": cleanCount - int64(len(canonical))}
+	// Only external hydration of trusted summaries needs an epoch proof. Raw
+	// recovery remains independent of missing or unavailable derived controls.
+	if useProjection && len(canonical) > 0 {
+		if projectionGeneration < 1 {
+			return nil, fmt.Errorf("invalid recovery projection generation")
+		}
+		meta["maintenance_generation"] = projectionGeneration
+	}
+	if metricsOnly {
+		meta["representation"] = "metrics-v1"
+	}
 	if recoveryReason != "" {
 		meta["recoveryReason"] = recoveryReason
 	}
