@@ -99,9 +99,9 @@ func initializeProjectionModels(ctx context.Context, db *sql.DB, prefix string) 
 	if !ingest.ProjectionMaintenanceEnabled() {
 		return nil
 	}
-	// The grouping-sets execution contract requires OceanBase 4.4 or later. Both Community and
-	// Enterprise editions use the same optional capability; seekdb retains its
-	// existing complete metrics-window contract.
+	// OceanBase 4.4+ uses grouping sets; recognized seekdb 1.4+ uses a compatible
+	// grouping-axis query over the same optional typed storage. Older/unknown
+	// engines retain the complete metrics-window contract.
 	return ingest.InitializeTraceStatistics(ctx, db, prefix)
 }
 

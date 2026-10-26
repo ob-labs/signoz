@@ -76,6 +76,24 @@ func statisticsPartitionsSQL(calls, group string, width int64) string {
 	return "SELECT GROUPING(c.kind) AS grouping_kind,GROUPING(c.dimension) AS grouping_dimension,GROUPING(c.bucket_ns) AS grouping_bucket,c.kind,c.dimension,c.bucket_ns,COUNT(*) AS operationCount," + statisticsConditionalUsageSQL() + " FROM (" + facts + ") c GROUP BY GROUPING SETS ((),(c.kind),(c.dimension),(c.bucket_ns),(c.kind,c.bucket_ns))"
 }
 
+// seekdb 1.4 does not accept GROUPING SETS. Expand the one authorized narrow
+// input across five explicit axes; the axis keeps actual NULL dimensions apart
+// from omitted grouping keys without five copies of the authorization joins.
+func statisticsSeekdbPartitionsSQL(calls, group string, width int64) string {
+	columns := []string{"c.kind", "CASE WHEN c.kind IN ('GENERATION','EMBEDDING') THEN BINARY c." + group + " ELSE NULL END AS dimension", fmt.Sprintf("(c.start_ns DIV %d)*%d AS bucket_ns", width, width), "c.ambiguous", "c.cost_currency"}
+	for _, field := range statisticsUsageColumns {
+		columns = append(columns, "c."+field.column)
+	}
+	facts := "SELECT " + strings.Join(columns, ",") + calls
+	expanded := []string{"c.kind", "a.axis", "CASE WHEN a.axis IN (1,4) THEN c.kind ELSE NULL END AS grouped_kind", "CASE WHEN a.axis=2 THEN c.dimension ELSE NULL END AS dimension", "CASE WHEN a.axis IN (3,4) THEN c.bucket_ns ELSE NULL END AS bucket_ns", "c.ambiguous", "c.cost_currency"}
+	for _, field := range statisticsUsageColumns {
+		expanded = append(expanded, "c."+field.column)
+	}
+	axes := "SELECT 0 AS axis UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4"
+	input := "SELECT " + strings.Join(expanded, ",") + " FROM (" + facts + ") c CROSS JOIN (" + axes + ") a"
+	return "SELECT CASE WHEN c.axis IN (1,4) THEN 0 ELSE 1 END AS grouping_kind,CASE WHEN c.axis=2 THEN 0 ELSE 1 END AS grouping_dimension,CASE WHEN c.axis IN (3,4) THEN 0 ELSE 1 END AS grouping_bucket,c.grouped_kind AS kind,c.dimension,c.bucket_ns,COUNT(*) AS operationCount," + statisticsConditionalUsageSQL() + " FROM (" + input + ") c GROUP BY c.axis,c.grouped_kind,c.dimension,c.bucket_ns"
+}
+
 func emptyStatisticsUsage() map[string]any {
 	row := map[string]any{"callCount": int64(0), "ambiguousCount": int64(0), "costCurrencyInvalid": int64(0)}
 	for _, field := range statisticsUsageColumns {

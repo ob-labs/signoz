@@ -17,10 +17,20 @@ const StatisticsReceiptColumn = "statistics_receipt_v1"
 const StatisticsReceiptExpression = "JSON_UNQUOTE(JSON_EXTRACT(row_json,'$._statistics.receipt'))"
 
 var statisticsVersionPattern = regexp.MustCompile(`(?i)OceanBase(?:_CE)?-v([0-9]+)\.([0-9]+)`)
+var statisticsSeekdbVersionPattern = regexp.MustCompile(`(?i)^(?:[0-9]+\.[0-9]+\.[0-9]+-)?(?:OceanBase )?seekdb-v([0-9]+)\.([0-9]+)\.[0-9]+(?:\.[0-9]+)?$`)
 
 func TraceStatisticsVersionSupported(version string) bool {
 	if strings.Contains(strings.ToLower(version), "seekdb") {
-		return false
+		parts := statisticsSeekdbVersionPattern.FindStringSubmatch(version)
+		if len(parts) != 3 {
+			return false
+		}
+		major, e := strconv.Atoi(parts[1])
+		if e != nil {
+			return false
+		}
+		minor, e := strconv.Atoi(parts[2])
+		return e == nil && major == 1 && minor >= 4
 	}
 	parts := statisticsVersionPattern.FindStringSubmatch(version)
 	if len(parts) != 3 {
@@ -175,6 +185,25 @@ func TraceStatisticsDDL(prefix string) ([]string, error) {
 	}, nil
 }
 
+// TraceStatisticsDDLForVersion keeps OceanBase's explicit row layout while
+// seekdb uses its ordinary row-table syntax without the unsupported column-group
+// clause. The caller supplies its existing version read; no DDL-error probing.
+func TraceStatisticsDDLForVersion(prefix, version string) ([]string, error) {
+	statements, err := TraceStatisticsDDL(prefix)
+	if err != nil {
+		return nil, err
+	}
+	if !TraceStatisticsVersionSupported(version) {
+		return nil, fmt.Errorf("unsupported statistics DDL engine")
+	}
+	if strings.Contains(strings.ToLower(version), "seekdb") {
+		for i, statement := range statements {
+			statements[i] = strings.TrimSuffix(statement, " WITH COLUMN GROUP(all columns)")
+		}
+	}
+	return statements, nil
+}
+
 func InitializeTraceStatistics(ctx context.Context, db *sql.DB, prefix string) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
@@ -221,7 +250,7 @@ func InitializeTraceStatistics(ctx context.Context, db *sql.DB, prefix string) e
 		_, _ = db.ExecContext(releaseCtx, "UPDATE "+table+" SET migration_owner='',migration_until=0 WHERE id=1 AND migration_owner=? AND generation=?", owner, generation)
 	}()
 	return withProjectionMigrationConnection(ctx, db, func(conn *sql.Conn) error {
-		statements, e := TraceStatisticsDDL(prefix)
+		statements, e := TraceStatisticsDDLForVersion(prefix, version)
 		if e != nil {
 			return e
 		}

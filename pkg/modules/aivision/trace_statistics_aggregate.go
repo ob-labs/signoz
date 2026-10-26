@@ -107,8 +107,8 @@ func (s *oceanBaseStore) traceMetricsAggregate(ctx context.Context, org string, 
 	if e = tx.QueryRowContext(ctx, "SELECT VERSION()").Scan(&version); e != nil {
 		return nil, e
 	}
-	// The SQL grouping-sets shape is an optional OceanBase 4.4+ capability.
-	// A retained typed schema on an older engine must not bypass this guard.
+	// Only recognized OceanBase 4.4+ and seekdb 1.4+ families can use the typed
+	// schema. A retained schema on an older engine cannot bypass this guard.
 	if !ingest.TraceStatisticsVersionSupported(version) {
 		return readModelUnsupported("statistics_engine_unavailable"), nil
 	}
@@ -182,7 +182,11 @@ func (s *oceanBaseStore) traceMetricsAggregate(ctx context.Context, org string, 
 	result := map[string]any{"supported": true, "complete": true, "contract": traceStatisticsAggregateContract, "summary": summary, "latencies": latencies,
 		"meta": map[string]any{"complete": true, "representation": "statistics-v1", "space_id": p.SpaceID, "user": p.User, "agent_product": p.AgentProduct, "agent_uuid": p.AgentUUID, "projection_context": p.ProjectionContext, "from": p.From, "to": p.To, "bucket": bucket, "group_by": group, "maintenance_generation": generation}}
 	partitions := newStatisticsPartitions()
-	if e = scanReadModelRowsEach(ctx, tx, statisticsPartitionsSQL(calls, group, width), values, partitions.consume); e != nil {
+	partitionsSQL := statisticsPartitionsSQL(calls, group, width)
+	if strings.Contains(strings.ToLower(version), "seekdb") {
+		partitionsSQL = statisticsSeekdbPartitionsSQL(calls, group, width)
+	}
+	if e = scanReadModelRowsEach(ctx, tx, partitionsSQL, values, partitions.consume); e != nil {
 		if unsupported, ok := e.(tracePageUnsupported); ok {
 			return readModelUnsupported(unsupported.reason), nil
 		}
