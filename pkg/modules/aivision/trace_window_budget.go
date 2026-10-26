@@ -52,7 +52,11 @@ func (b *traceWindowWireBudget) addRawGroup(traceID string) error {
 }
 
 func traceWindowResponse(meta map[string]any, rows, details []map[string]any) map[string]any {
-	return map[string]any{"supported": true, "contract": traceWindowContract, "complete": true, "meta": meta, "rows": rows, "raw": details}
+	contract := traceWindowContract
+	if meta["representation"] == "metrics-v1" {
+		contract = traceMetricsWindowContract
+	}
+	return map[string]any{"supported": true, "contract": contract, "complete": true, "meta": meta, "rows": rows, "raw": details}
 }
 
 func (b *traceWindowWireBudget) validateEnvelope(meta map[string]any) error {

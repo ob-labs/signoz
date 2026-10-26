@@ -64,7 +64,7 @@ func TestOceanBaseTraceReadModel(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, true, result.(map[string]any)["complete"])
 	contextHash := strings.Repeat("a", 64)
-	dirty, err := store.dirtyTraceSources(ctx, org, "scope", contextHash, "", 10)
+	dirty, err := store.dirtyTraceSources(ctx, org, "scope", contextHash, "", 10, "")
 	require.NoError(t, err)
 	require.Len(t, dirty.(map[string]any)["data"], 3)
 	for i := 1; i <= 3; i++ {
@@ -103,6 +103,30 @@ func TestOceanBaseTraceReadModel(t *testing.T) {
 	require.Len(t, rows, 3)
 	require.Equal(t, fmt.Sprintf("%032x", 3), rows[0]["trace_id"])
 	require.Equal(t, json.Number("9007199254740993"), rows[0]["total_tokens"])
+	// A new optional metrics supplement must not invalidate ready list rows.
+	legacyDirty, err := store.dirtyTraceSources(ctx, org, "scope", contextHash, "", 10, "")
+	require.NoError(t, err)
+	require.Empty(t, legacyDirty.(map[string]any)["data"])
+	upgradeDirty, err := store.dirtyTraceSources(ctx, org, "scope", contextHash, "", 10, traceMetricsSupplementVersion)
+	require.NoError(t, err)
+	require.Len(t, upgradeDirty.(map[string]any)["data"], 3)
+	require.Equal(t, traceMetricsSupplementVersion, upgradeDirty.(map[string]any)["required_supplement"])
+	// Only this test's isolated projection fixture changes. Raw Spans and
+	// source revisions remain untouched during a gradual supplement upgrade.
+	_, err = db.Exec("UPDATE "+store.readModelTable("trace_projections")+" SET row_json=JSON_SET(row_json,'$._metrics',JSON_OBJECT('version',?)) WHERE org_id=? AND space_id=? AND trace_id=?",
+		traceMetricsSupplementVersion, org, "scope", fmt.Sprintf("%032x", 1))
+	require.NoError(t, err)
+	upgradeDirty, err = store.dirtyTraceSources(ctx, org, "scope", contextHash, "", 10, traceMetricsSupplementVersion)
+	require.NoError(t, err)
+	require.Len(t, upgradeDirty.(map[string]any)["data"], 2)
+	upgradePage, err := store.readModelPage(ctx, org, params)
+	require.NoError(t, err)
+	require.Equal(t, true, upgradePage.(map[string]any)["supported"])
+	require.Len(t, upgradePage.(map[string]any)["data"], 3)
+	var cleanSources, originalRevisions int
+	require.NoError(t, db.QueryRow("SELECT SUM(NOT dirty),SUM(source_revision=1) FROM "+store.readModelTable("trace_sources")+" WHERE org_id=? AND space_id=?", org, "scope").Scan(&cleanSources, &originalRevisions))
+	require.Equal(t, 3, cleanSources)
+	require.Equal(t, 3, originalRevisions)
 	facets := response["facets"].(nativeFacets)
 	require.Len(t, facets["env"], 2)
 	require.Len(t, facets["scene"], 2)

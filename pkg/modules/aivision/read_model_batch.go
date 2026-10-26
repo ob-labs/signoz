@@ -1,6 +1,7 @@
 package aivision
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -73,11 +74,26 @@ func (s *oceanBaseStore) publishTraceChunk(ctx context.Context, org string, item
 	if err != nil {
 		return nil, err
 	}
+	// Capability belongs to this transaction, not to a process-wide cache. A
+	// batch backfill inspects optional metadata once for at most 25 Traces.
+	statisticsCapability := []bool{}
+	if enabled {
+		for _, item := range items {
+			if bytes.Contains(item.Row, []byte(`"_statistics"`)) {
+				ready, e := ingest.TraceStatisticsSchemaReady(ctx, tx, s.cfg.TablePrefix)
+				if e != nil {
+					return nil, e
+				}
+				statisticsCapability = []bool{ready}
+				break
+			}
+		}
+	}
 	data := make([]any, 0, len(items))
 	for _, p := range items {
 		receipt := readModelUnsupported("projection_maintenance_unavailable")
 		if enabled {
-			receipt, err = s.publishTraceProjectionInTx(ctx, tx, org, p, generation)
+			receipt, err = s.publishTraceProjectionInTx(ctx, tx, org, p, generation, statisticsCapability...)
 			if err != nil {
 				return nil, err
 			}

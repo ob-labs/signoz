@@ -50,6 +50,7 @@ func TestRecoveryWindowRawWorksWithoutProjectionTables(t *testing.T) {
 	r := result.(map[string]any)
 	require.True(t, r["complete"].(bool))
 	require.Equal(t, traceWindowContract, r["contract"])
+	require.NotContains(t, r["meta"].(map[string]any), "maintenance_generation")
 	raw := r["raw"].([]map[string]any)
 	span := raw[0]["spans"].([]map[string]any)[0]
 	require.Equal(t, json.Number("9007199254740993"), span["attributes"].(map[string]any)["count"])
@@ -88,6 +89,7 @@ func TestRecoveryWindowMaintenanceOffUsesRawOnly(t *testing.T) {
 	result, e := s.traceWindow(context.Background(), "org", windowTestParams(), false)
 	require.NoError(t, e)
 	require.True(t, result.(map[string]any)["meta"].(map[string]any)["raw"].(bool))
+	require.NotContains(t, result.(map[string]any)["meta"].(map[string]any), "maintenance_generation")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -108,6 +110,7 @@ func TestRecoveryWindowMergesCleanAndDirtyInOneSnapshot(t *testing.T) {
 	r := result.(map[string]any)
 	require.Len(t, r["rows"], 1)
 	require.Len(t, r["raw"], 1)
+	require.EqualValues(t, 1, r["meta"].(map[string]any)["maintenance_generation"])
 	require.Equal(t, "complete searchable input", r["rows"].([]map[string]any)[0]["attributes.gen_ai.input.messages"])
 	require.NoError(t, mock.ExpectationsWereMet())
 }

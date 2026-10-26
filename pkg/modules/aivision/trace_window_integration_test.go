@@ -53,7 +53,7 @@ func TestOceanBaseRecoveryWindowMergesAndFallsBack(t *testing.T) {
 	// Only one Trace is published. History can still be incomplete, and the
 	// boundary Trace must be represented by only its in-window raw child span.
 	id := fmt.Sprintf("%032x", 1)
-	row, _ := json.Marshal(map[string]any{"trace_id": id, "start_time_unix_nano": fmt.Sprint(start.UnixNano()), "span_count": 2, "attributes.gen_ai.input.messages": "complete clean input", "_traceTags": []string{}, "_sceneValues": []string{}})
+	row, _ := json.Marshal(map[string]any{"trace_id": id, "start_time_unix_nano": fmt.Sprint(start.UnixNano()), "span_count": 2, "attributes.gen_ai.input.messages": "complete clean input", "usage": map[string]any{"total": json.Number("9007199254740993")}, "userId": nil, "_traceTags": []string{}, "_sceneValues": []string{}})
 	projection := validProjection()
 	projection.MaintenanceGeneration = integrationProjectionGeneration(t, db, prefix)
 	projection.SpaceID = "scope"
@@ -82,8 +82,8 @@ func TestOceanBaseRecoveryWindowMergesAndFallsBack(t *testing.T) {
 	// complete raw Span fits. The alternate representation must retain the same
 	// snapshot, all Trace/Span identities and explicit raw-only metadata.
 	originalRow := projection.Row
-	wide := map[string]any{}
-	require.NoError(t, json.Unmarshal(projection.Row, &wide))
+	wide, err := tracePageJSON(string(projection.Row))
+	require.NoError(t, err)
 	wide["attributes.gen_ai.input.messages"] = strings.Repeat("full canonical IO ", 4096)
 	projection.Row, err = json.Marshal(wide)
 	require.NoError(t, err)
@@ -103,6 +103,25 @@ func TestOceanBaseRecoveryWindowMergesAndFallsBack(t *testing.T) {
 	explicitRaw, err := store.traceWindow(ctx, org, p, true)
 	require.NoError(t, err)
 	require.Equal(t, explicitRaw.(map[string]any)["raw"], bounded["raw"])
+	// Metrics must not pay for large canonical IO. It shares the exact same
+	// dirty/boundary raw groups, physical scope and source counts as full recovery.
+	metricsResult, err := store.traceWindowRepresentation(ctx, org, p, false, traceWindowEnvelopeReserve+16384, true)
+	require.NoError(t, err)
+	metrics := metricsResult.(map[string]any)
+	require.Equal(t, "native-trace-metrics-window-v1", metrics["contract"])
+	require.Equal(t, "metrics-v1", metrics["meta"].(map[string]any)["representation"])
+	require.Equal(t, false, metrics["meta"].(map[string]any)["raw"])
+	require.EqualValues(t, 5, metrics["meta"].(map[string]any)["spanCount"])
+	require.Equal(t, r["raw"], metrics["raw"])
+	compact := metrics["rows"].([]map[string]any)
+	require.Len(t, compact, 1)
+	require.Equal(t, id, compact[0]["trace_id"])
+	require.Equal(t, json.Number("9007199254740993"), compact[0]["usage"].(map[string]any)["total"])
+	require.Contains(t, compact[0], "userId")
+	require.Nil(t, compact[0]["userId"])
+	require.NotContains(t, compact[0], "environment")
+	require.NotContains(t, compact[0], "attributes.gen_ai.input.messages")
+	require.NotContains(t, compact[0], "ioPreview")
 	projection.Row = originalRow
 	_, err = store.publishTraceProjection(ctx, org, projection)
 	require.NoError(t, err)

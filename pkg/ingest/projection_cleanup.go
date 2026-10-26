@@ -5,8 +5,11 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"time"
+
+	"github.com/go-sql-driver/mysql"
 )
 
 // Cleanup is derived-only. Short commits keep the ordinary statement deadline
@@ -40,8 +43,11 @@ func deleteProjectionDerivedChunk(ctx context.Context, db *sql.DB, prefix, suffi
 	if _, err := projectionMaintenanceTable(prefix); err != nil {
 		return 0, err
 	}
+	optional := false
 	switch suffix {
 	case "trace_projections", "trace_sources", "trace_projection_coverage":
+	case "call_statistics", "trace_statistics":
+		optional = true
 	default:
 		return 0, fmt.Errorf("invalid projection cleanup table")
 	}
@@ -55,6 +61,13 @@ func deleteProjectionDerivedChunk(ctx context.Context, db *sql.DB, prefix, suffi
 	}
 	result, err := tx.ExecContext(ctx, "DELETE FROM "+tableName(prefix, suffix)+" LIMIT 256")
 	if err != nil {
+		// Older installations never created optional statistics. Their absence
+		// must not block base-model recovery. All other errors remain visible;
+		// in particular a denied delete cannot masquerade as an empty table.
+		var databaseError *mysql.MySQLError
+		if optional && errors.As(err, &databaseError) && databaseError.Number == 1146 {
+			return 0, nil
+		}
 		return 0, fmt.Errorf("delete projection cleanup chunk %s: %w", suffix, err)
 	}
 	affected, err := result.RowsAffected()
@@ -71,7 +84,7 @@ func deleteProjectionDerivedChunk(ctx context.Context, db *sql.DB, prefix, suffi
 }
 
 func resetProjectionDerived(ctx context.Context, db *sql.DB, prefix string, lease projectionCleanupLease) error {
-	for _, suffix := range []string{"trace_projections", "trace_sources", "trace_projection_coverage"} {
+	for _, suffix := range []string{"trace_projections", "trace_sources", "trace_projection_coverage", "call_statistics", "trace_statistics"} {
 		for {
 			if err := ctx.Err(); err != nil {
 				return err

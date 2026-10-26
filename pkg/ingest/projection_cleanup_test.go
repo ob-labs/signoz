@@ -64,6 +64,7 @@ func TestProjectionCleanupCommitsBoundedChunksAndRemainingRowsResume(t *testing.
 	expectProjectionCleanupChunk(mock, "trace_projections", 3, 17, false)
 	expectProjectionCleanupChunk(mock, "trace_sources", 3, 0, false)
 	expectProjectionCleanupChunk(mock, "trace_projection_coverage", 3, 0, false)
+	expectOptionalStatisticsCleanupAbsent(mock, 3)
 	if err := resetProjectionDerived(context.Background(), db, "test", projectionCleanupLease{"owner", 3}); err != nil {
 		t.Fatal(err)
 	}
@@ -110,6 +111,7 @@ func TestNewOffDuringResumeIsNotOverriddenOrReportedResumed(t *testing.T) {
 	for _, suffix := range []string{"trace_projections", "trace_sources", "trace_projection_coverage"} {
 		expectProjectionCleanupChunk(mock, suffix, 3, 0, false)
 	}
+	expectOptionalStatisticsCleanupAbsent(mock, 3)
 	// A newer OFF changed suspended while reads were still disabled. Finalize
 	// must retain that OFF value and report that recovery did not resume reads.
 	expectProjectionCleanupFinish(mock, 3, true)

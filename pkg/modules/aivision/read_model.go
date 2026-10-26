@@ -19,6 +19,7 @@ import (
 )
 
 const traceReadModelContract = "native-trace-read-model-v1"
+const traceMetricsSupplementVersion = "native-trace-metrics-v1"
 
 var projectionContextPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 var readModelTraceID = regexp.MustCompile(`^[0-9a-f]{1,32}$`)
@@ -173,6 +174,28 @@ func (h *handler) ReadModel(w http.ResponseWriter, r *http.Request) {
 	var result any
 	var err error
 	switch action {
+	case "operation-page":
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w, http.MethodGet)
+			return
+		}
+		var p nativeListParams
+		var limit int
+		p, limit, err = h.operationPageParams(r)
+		if err == nil {
+			result, err = h.backend.traceOperationPage(ctx, org, p, limit)
+		}
+	case "metrics-aggregate":
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w, http.MethodGet)
+			return
+		}
+		var p nativeListParams
+		var bucket, group string
+		p, bucket, group, err = h.statisticsParams(r)
+		if err == nil {
+			result, err = h.backend.traceMetricsAggregate(ctx, org, p, bucket, group)
+		}
 	case "batch-snapshot", "batch-publish":
 		method := http.MethodGet
 		if action == "batch-publish" {
@@ -183,7 +206,7 @@ func (h *handler) ReadModel(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		result, err = h.projectionBatchAction(r, ctx, org, action)
-	case "window":
+	case "window", "metrics-window":
 		if r.Method != http.MethodGet {
 			methodNotAllowed(w, http.MethodGet)
 			return
@@ -192,7 +215,11 @@ func (h *handler) ReadModel(w http.ResponseWriter, r *http.Request) {
 		var raw bool
 		p, raw, err = h.traceWindowParams(r)
 		if err == nil {
-			result, err = h.backend.traceWindow(ctx, org, p, raw)
+			if action == "metrics-window" {
+				result, err = h.backend.traceMetricsWindow(ctx, org, p, raw)
+			} else {
+				result, err = h.backend.traceWindow(ctx, org, p, raw)
+			}
 		}
 	case "maintenance/resume":
 		if r.Method != http.MethodPost {
@@ -209,6 +236,9 @@ func (h *handler) ReadModel(w http.ResponseWriter, r *http.Request) {
 			err = ingest.ResumeProjectionMaintenance(ctx, h.backend.db, h.backend.cfg.TablePrefix)
 			if err == nil {
 				result = map[string]any{"supported": true, "resumed": true}
+				if optionalErr := ingest.InitializeTraceStatistics(ctx, h.backend.db, h.backend.cfg.TablePrefix); optionalErr != nil && h.logger != nil {
+					h.logger.Warn("optional statistics initialization after maintenance resume failed; complete metrics fallback retained", "error", optionalErr)
+				}
 			}
 		}
 	case "sessions/page":
@@ -259,6 +289,14 @@ func (h *handler) ReadModel(w http.ResponseWriter, r *http.Request) {
 				err = fmt.Errorf("invalid dirty limit")
 				break
 			}
+			requiredSupplement := ""
+			if values, present := r.URL.Query()["required_supplement"]; present {
+				if len(values) != 1 || values[0] != traceMetricsSupplementVersion {
+					err = fmt.Errorf("invalid required_supplement version")
+					break
+				}
+				requiredSupplement = values[0]
+			}
 			projectionContext := r.URL.Query().Get("projection_context")
 			if !projectionContextPattern.MatchString(projectionContext) {
 				writeJSON(w, 200, readModelUnsupported("projection_context_required"))
@@ -269,7 +307,15 @@ func (h *handler) ReadModel(w http.ResponseWriter, r *http.Request) {
 				err = fmt.Errorf("invalid after_trace_id")
 				break
 			}
-			result, err = h.backend.dirtyTraceSources(ctx, org, space, projectionContext, after, limit)
+			requiredStatistics := ""
+			if values, present := r.URL.Query()["required_statistics"]; present {
+				if len(values) != 1 || values[0] != traceStatisticsVersion {
+					err = fmt.Errorf("invalid required_statistics version")
+					break
+				}
+				requiredStatistics = values[0]
+			}
+			result, err = h.backend.dirtyTraceSources(ctx, org, space, projectionContext, after, limit, requiredSupplement, requiredStatistics)
 		}
 	case "page":
 		allowed := map[string]bool{}
@@ -444,7 +490,10 @@ func (s *oceanBaseStore) traceSourceSnapshot(ctx context.Context, org, space, tr
 	}
 	return map[string]any{"supported": true, "source_user_id": sourceUser, "source_agent_product": sourceProduct, "scope_valid": scopeValid, "contract": "native-trace-source-v1", "trace_id": trace, "source_revision": revision, "maintenance_generation": generation, "span_count": count, "min_timestamp": strconv.FormatInt(min, 10), "max_timestamp": strconv.FormatInt(max, 10), "complete": true, "spans": rows}, nil
 }
-func (s *oceanBaseStore) dirtyTraceSources(ctx context.Context, org, space, projectionContext, after string, limit int) (any, error) {
+func (s *oceanBaseStore) dirtyTraceSources(ctx context.Context, org, space, projectionContext, after string, limit int, requiredSupplement string, requiredStatistics ...string) (any, error) {
+	if requiredSupplement != "" && requiredSupplement != traceMetricsSupplementVersion {
+		return nil, fmt.Errorf("invalid required_supplement version")
+	}
 	tx, err := s.beginReadModel(ctx, true)
 	if err != nil {
 		return nil, err
@@ -455,8 +504,34 @@ func (s *oceanBaseStore) dirtyTraceSources(ctx context.Context, org, space, proj
 	} else if reason != "" {
 		return readModelUnsupported(reason), nil
 	}
-	query := "SELECT s.trace_id,s.source_revision FROM " + s.readModelTable("trace_sources") + " s LEFT JOIN " + s.readModelTable("trace_projections") + " p ON p.org_id=s.org_id AND p.space_id=s.space_id AND p.trace_id=s.trace_id WHERE s.org_id=? AND s.space_id=? AND (s.scope_valid=FALSE OR s.dirty=TRUE OR p.trace_id IS NULL OR p.source_revision<>s.source_revision OR p.semantics_version<>1 OR p.projection_context<>?) AND s.trace_id>? ORDER BY BINARY s.trace_id LIMIT ?"
-	rows, err := scanReadModelRows(ctx, tx, query, org, space, projectionContext, after, limit+1)
+	statisticsReady := false
+	if len(requiredStatistics) > 0 && requiredStatistics[0] != "" {
+		if requiredStatistics[0] != traceStatisticsVersion {
+			return nil, fmt.Errorf("invalid required_statistics version")
+		}
+		statisticsReady, err = ingest.TraceStatisticsSchemaReady(ctx, tx, s.cfg.TablePrefix)
+		if err != nil {
+			return nil, err
+		}
+	}
+	join := ""
+	if statisticsReady {
+		join = " LEFT JOIN " + s.readModelTable("trace_statistics") + " t ON t.org_id=p.org_id AND t.space_id=p.space_id AND t.trace_id=p.trace_id"
+	}
+	query := "SELECT s.trace_id,s.source_revision FROM " + s.readModelTable("trace_sources") + " s LEFT JOIN " + s.readModelTable("trace_projections") + " p ON p.org_id=s.org_id AND p.space_id=s.space_id AND p.trace_id=s.trace_id" + join + " WHERE s.org_id=? AND s.space_id=? AND (s.scope_valid=FALSE OR s.dirty=TRUE OR p.trace_id IS NULL OR p.source_revision<>s.source_revision OR p.semantics_version<>1 OR p.projection_context<>?"
+	args := []any{org, space, projectionContext}
+	if statisticsReady {
+		query += " OR t.trace_id IS NULL OR t.source_revision<>p.source_revision OR BINARY t.projection_context<>BINARY p.projection_context OR p.statistics_receipt_v1 IS NULL OR BINARY t.receipt<>BINARY p.statistics_receipt_v1"
+	} else if requiredSupplement != "" {
+		// Supplements can be populated incrementally without invalidating ready
+		// Trace/Session summaries or changing their source revisions. COALESCE
+		// includes absent JSON paths; JSON null also differs from the version.
+		query += " OR BINARY COALESCE(JSON_UNQUOTE(JSON_EXTRACT(p.row_json,'$._metrics.version')),'')<>BINARY ?"
+		args = append(args, requiredSupplement)
+	}
+	query += ") AND s.trace_id>? ORDER BY BINARY s.trace_id LIMIT ?"
+	args = append(args, after, limit+1)
+	rows, err := scanReadModelRows(ctx, tx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -471,7 +546,14 @@ func (s *oceanBaseStore) dirtyTraceSources(ctx context.Context, org, space, proj
 	if len(rows) > 0 {
 		cursor = fmt.Sprint(rows[len(rows)-1]["trace_id"])
 	}
-	return map[string]any{"supported": true, "data": rows, "has_more": hasMore, "next_cursor": cursor}, nil
+	result := map[string]any{"supported": true, "data": rows, "has_more": hasMore, "next_cursor": cursor}
+	if requiredSupplement != "" {
+		result["required_supplement"] = requiredSupplement
+	}
+	if statisticsReady {
+		result["required_statistics"] = traceStatisticsVersion
+	}
+	return result, nil
 }
 func (s *oceanBaseStore) publishTraceProjection(ctx context.Context, org string, p traceProjection) (any, error) {
 	tx, err := s.beginReadModel(ctx, false)
@@ -501,7 +583,7 @@ func (s *oceanBaseStore) publishTraceProjection(ctx context.Context, org string,
 
 // The caller must hold the shared maintenance fence in this write transaction.
 // Single and batch publication use the identical source scope/revision CAS.
-func (s *oceanBaseStore) publishTraceProjectionInTx(ctx context.Context, tx *sql.Tx, org string, p traceProjection, generation int64) (map[string]any, error) {
+func (s *oceanBaseStore) publishTraceProjectionInTx(ctx context.Context, tx *sql.Tx, org string, p traceProjection, generation int64, statisticsCapability ...bool) (map[string]any, error) {
 	if p.MaintenanceGeneration != generation {
 		return readModelUnsupported("maintenance_generation_changed"), nil
 	}
@@ -541,6 +623,9 @@ func (s *oceanBaseStore) publishTraceProjectionInTx(ctx context.Context, tx *sql
 	}
 	query := "INSERT INTO " + s.readModelTable("trace_projections") + " (org_id,space_id,trace_id," + strings.Join(columns, ",") + ") VALUES (" + strings.TrimSuffix(strings.Repeat("?,", len(args)), ",") + ") ON DUPLICATE KEY UPDATE " + strings.Join(updates, ",")
 	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+		return nil, err
+	}
+	if err := s.publishStatistics(ctx, tx, org, p, statisticsCapability...); err != nil {
 		return nil, err
 	}
 	if _, err := tx.ExecContext(ctx, "UPDATE "+s.readModelTable("trace_sources")+" SET dirty=FALSE WHERE org_id=? AND space_id=? AND trace_id=? AND source_revision=?", org, p.SpaceID, p.TraceID, p.SourceRevision); err != nil {
