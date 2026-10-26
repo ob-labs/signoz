@@ -71,38 +71,52 @@ func New(ctx context.Context, settings factory.ProviderSettings, config telemetr
 	// A derived-schema failure must not stop the raw telemetry service. The
 	// durable migration fence remains ineligible until retry finishes.
 	initCtx, initCancel := context.WithTimeout(ctx, 2*time.Minute)
-	err = initializeProjectionModels(initCtx, db, config.OceanBase.TablePrefix)
+	complete, err := initializeProjectionModels(initCtx, db, config.OceanBase.TablePrefix)
 	initCancel()
 	if err != nil && settings.Logger != nil {
 		settings.Logger.Warn("projection maintenance initialization failed; raw queries remain available", "error", err)
 	}
 
 	result := &provider{db: db, config: config.OceanBase, hooks: hooks}
-	if err != nil {
+	if err != nil || !complete {
 		retryCtx, retryCancel := context.WithCancel(ctx)
 		result.maintenanceCancel = retryCancel
-		go retryProjectionMaintenance(retryCtx, 5*time.Second, func(attemptCtx context.Context) error {
-			attemptErr := initializeProjectionModels(attemptCtx, db, config.OceanBase.TablePrefix)
-			if attemptErr != nil && settings.Logger != nil {
+		go retryProjectionMaintenance(retryCtx, 5*time.Second, time.Minute, func(attemptCtx context.Context) (bool, error) {
+			complete, attemptErr := initializeProjectionModels(attemptCtx, db, config.OceanBase.TablePrefix)
+			if attemptErr != nil && retryCtx.Err() == nil && settings.Logger != nil {
 				settings.Logger.Warn("retry projection maintenance initialization", "error", attemptErr)
 			}
-			return attemptErr
+			return complete, attemptErr
 		})
 	}
 	return result, nil
 }
 
-func initializeProjectionModels(ctx context.Context, db *sql.DB, prefix string) error {
-	if err := ingest.InitializeTraceReadModelMaintenance(ctx, db, prefix, ingest.ProjectionMaintenanceEnabled()); err != nil {
-		return err
+func initializeProjectionModels(ctx context.Context, db *sql.DB, prefix string) (bool, error) {
+	enabled := ingest.ProjectionMaintenanceEnabled()
+	if err := ingest.InitializeTraceReadModelMaintenance(ctx, db, prefix, enabled); err != nil {
+		return false, err
 	}
-	if !ingest.ProjectionMaintenanceEnabled() {
-		return nil
+	if !enabled {
+		return true, nil
 	}
 	// OceanBase 4.4+ uses grouping sets; recognized seekdb 1.4+ uses a compatible
 	// grouping-axis query over the same optional typed storage. Older/unknown
 	// engines retain the complete metrics-window contract.
-	return ingest.InitializeTraceStatistics(ctx, db, prefix)
+	if err := ingest.InitializeTraceStatistics(ctx, db, prefix); err != nil {
+		return false, err
+	}
+	// A nil initializer result can also mean durable OFF. Keep the provider's
+	// worker pending until supported optional storage is actually ready, so a
+	// later explicit resume can recover from a transient DDL failure by itself.
+	var version string
+	if err := db.QueryRowContext(ctx, "SELECT VERSION()").Scan(&version); err != nil {
+		return false, err
+	}
+	if !ingest.TraceStatisticsVersionSupported(version) {
+		return true, nil
+	}
+	return ingest.TraceStatisticsSchemaReady(ctx, db, prefix)
 }
 
 func (p *provider) QueryContext(ctx context.Context, query string, args ...any) (telemetrystore.Rows, error) {
@@ -159,16 +173,18 @@ func (p *provider) Indexes(context.Context, string, ...any) (telemetrystoretypes
 func (p *provider) SQLDB() *sql.DB { return p.db }
 
 // Retry transient migration failures without taking the raw service offline.
+// Nil pending results idle without warnings or optional DDL while durable OFF.
 // Shutdown cancels both a pending delay and an active bounded attempt.
-func retryProjectionMaintenance(ctx context.Context, interval time.Duration, initialize func(context.Context) error) {
-	timer := time.NewTicker(interval)
-	defer timer.Stop()
+func retryProjectionMaintenance(ctx context.Context, retryInterval, idleInterval time.Duration, initialize func(context.Context) (bool, error)) {
+	delay := retryInterval
 	for {
 		if ctx.Err() != nil {
 			return
 		}
+		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
 		case <-timer.C:
 		}
@@ -176,10 +192,14 @@ func retryProjectionMaintenance(ctx context.Context, interval time.Duration, ini
 			return
 		}
 		attemptCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-		err := initialize(attemptCtx)
+		complete, err := initialize(attemptCtx)
 		cancel()
-		if err == nil {
+		if err == nil && complete {
 			return
+		}
+		delay = retryInterval
+		if err == nil {
+			delay = idleInterval
 		}
 	}
 }
