@@ -5,6 +5,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -12,6 +13,29 @@ import (
 	"github.com/SigNoz/signoz/pkg/telemetrystore"
 	"github.com/stretchr/testify/require"
 )
+
+func TestSessionContentMatchKeepsCompleteIOForPythonVerification(t *testing.T) {
+	s, mock := sessionPageBatchStore(t, "true")
+	p := sessionReadModelTestParams()
+	p.Keyword, p.SearchType = "tail-only-needle", "input"
+	sessionPageBatchExpectPage(mock, sqlmock.NewRows([]string{"session_id", "trace_count", "last_activity"}).AddRow("s", 1, 150), 1, true)
+	mock.ExpectQuery(`SELECT p\.session_id,COUNT`).WillReturnRows(sqlmock.NewRows([]string{"session_id", "trace_count", "selected_bytes"}).AddRow("s", 1, 4096))
+	input := strings.Repeat("prefix ", 200) + "tail-only-needle"
+	row := map[string]any{"trace_id": "01", "name": "turn", "userId": "owner", "session_id": "s", "environment": "prod", "environmentSource": "root-span-resource-v1", "start_time_unix_nano": "100000000", "end_time_unix_nano": "101000000", "duration_ms": 1, "status_code": 1, "span_count": 1, "usage": map[string]any{"total": 0}, "coverage": map[string]any{}, "reportedUsage": map[string]any{}, "rootObservationId": "root", "rootSelectionReason": "root_span", "missingParentIds": []string{}, "_traceTags": []string{}, "_sceneValues": []string{}, "resource.attributes.aivision.agent.id": "agent", "resource.attributes.aivision.space.id": "space", "attributes.gen_ai.input.messages": input, "attributes.gen_ai.output.messages": "full answer"}
+	encoded, err := json.Marshal(row)
+	require.NoError(t, err)
+	preview := `{"version":"native-trace-preview-v1","complete":true,"input":"bounded prefix","output":"bounded answer","inputTruncated":true,"outputTruncated":true,"rootObservationId":"root"}`
+	mock.ExpectQuery(`SELECT p\.session_id AS session_id`).WillReturnRows(sqlmock.NewRows([]string{"session_id", "trace_id", "row_json", "preview_json", "source_revision", "matched"}).AddRow("s", "01", string(encoded), preview, 7, 1))
+	sessionPageBatchExpectFacets(mock, 0)
+	mock.ExpectCommit()
+	result, err := s.sessionReadModelPage(context.Background(), "org", p)
+	require.NoError(t, err)
+	trace := result.(map[string]any)["data"].([]map[string]any)[0]["traces"].([]map[string]any)[0]
+	require.True(t, strings.HasSuffix(trace["attributes.gen_ai.input.messages"].(string), "tail-only-needle"))
+	require.Equal(t, input, trace["attributes.gen_ai.input.messages"])
+	require.Equal(t, "full answer", trace["attributes.gen_ai.output.messages"])
+	require.NoError(t, mock.ExpectationsWereMet())
+}
 
 // A middle-turn SDK/content match must retain every scoped turn; exact Session
 // IDs differing only by padding/case must remain separate, in page order.
@@ -32,11 +56,11 @@ func sessionPageBatchResult(t *testing.T, flag string, batch bool) map[string]an
 	p := sessionReadModelTestParams()
 	p.Username, p.Keyword, p.SearchType = " user ", " needle ", "input"
 	groups := sqlmock.NewRows([]string{"session_id", "trace_count", "last_activity"}).AddRow(" s ", 2, 150).AddRow("s", 1, 140).AddRow("S", 1, 130)
-	sessionPageBatchExpectPage(mock, groups, 3)
-	mock.ExpectQuery(`SELECT p\.session_id,COUNT\(\*\) AS trace_count,COALESCE\(SUM\(OCTET_LENGTH\(JSON_OBJECT`).WithArgs(sessionPageBatchScopeArgs(" s ", "s", "S")...).WillReturnRows(sqlmock.NewRows([]string{"session_id", "trace_count", "selected_bytes"}).AddRow("S", 1, 300).AddRow("s", 1, 300).AddRow(" s ", 2, 600))
+	sessionPageBatchExpectPage(mock, groups, 3, true)
+	mock.ExpectQuery(`SELECT p\.session_id,COUNT\(\*\) AS trace_count,COALESCE\(SUM\(OCTET_LENGTH\(JSON_REMOVE`).WithArgs(sessionPageBatchScopeArgs(" s ", "s", "S")...).WillReturnRows(sqlmock.NewRows([]string{"session_id", "trace_count", "selected_bytes"}).AddRow("S", 1, 300).AddRow("s", 1, 300).AddRow(" s ", 2, 600))
 	args := append([]driver.Value{" user ", " needle "}, sessionPageBatchScopeArgs(" s ", "s", "S")...)
 	args = append(args, sessionPageTraceLimit+1)
-	mock.ExpectQuery(`SELECT p\.session_id AS session_id,p\.trace_id AS trace_id,JSON_OBJECT`).WithArgs(args...).WillReturnRows(sessionPageBatchTraceRows(true, []string{" s ", " s ", "S", "s"}, []string{"01", "02", "04", "03"}))
+	mock.ExpectQuery(`SELECT p\.session_id AS session_id,p\.trace_id AS trace_id,JSON_REMOVE`).WithArgs(args...).WillReturnRows(sessionPageBatchTraceRows(true, []string{" s ", " s ", "S", "s"}, []string{"01", "02", "04", "03"}))
 	sessionPageBatchExpectFacets(mock)
 	mock.ExpectCommit()
 	result, err := s.sessionReadModelPage(context.Background(), "org", p)
@@ -57,11 +81,14 @@ func sessionPageBatchStore(t *testing.T, flag string) (*oceanBaseStore, sqlmock.
 	return s, mock
 }
 
-func sessionPageBatchExpectPage(mock sqlmock.Sqlmock, groups *sqlmock.Rows, total int) {
+func sessionPageBatchExpectPage(mock sqlmock.Sqlmock, groups *sqlmock.Rows, total int, content ...bool) {
 	mock.ExpectBegin()
 	expectProjectionMaintenance(mock, true, false)
 	mock.ExpectQuery("SELECT complete FROM").WithArgs("org", "space").WillReturnRows(sqlmock.NewRows([]string{"complete"}).AddRow(true))
-	mock.ExpectQuery("SELECT COALESCE").WillReturnRows(sqlmock.NewRows([]string{"stale", "boundary"}).AddRow(0, 0))
+	if len(content) > 0 && content[0] {
+		expectContentCapability(mock, false)
+	}
+	mock.ExpectQuery("SELECT COALESCE").WillReturnRows(sqlmock.NewRows([]string{"stale", "boundary", "incomplete_content"}).AddRow(0, 0, 0))
 	mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(total))
 	mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(total))
 	mock.ExpectQuery("SELECT session_id,COUNT").WillReturnRows(groups)

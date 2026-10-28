@@ -3,6 +3,7 @@ package aivision
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -14,11 +15,18 @@ const traceOperationPageContract = "native-trace-operation-page-v1"
 
 func (h *handler) operationPageParams(r *http.Request) (nativeListParams, int, error) {
 	q := r.URL.Query()
-	allowed := map[string]bool{"from": true, "to": true, "space_id": true, "user": true, "agent_product": true, "agent_uuid": true, "projection_context": true, "limit": true}
+	allowed := map[string]bool{"from": true, "to": true, "space_id": true, "user": true, "agent_product": true, "agent_uuid": true, "projection_context": true, "limit": true, "include_facts": true}
 	for key, values := range q {
 		if !allowed[key] || len(values) != 1 {
 			return nativeListParams{}, 0, fmt.Errorf("unsupported or repeated operation parameter: %s", key)
 		}
+	}
+	facts := false
+	if values, present := q["include_facts"]; present {
+		if values[0] != "true" && values[0] != "false" {
+			return nativeListParams{}, 0, fmt.Errorf("include_facts must be true or false")
+		}
+		facts = values[0] == "true"
 	}
 	limit := 200
 	if text, present := q["limit"]; present {
@@ -32,9 +40,11 @@ func (h *handler) operationPageParams(r *http.Request) (nativeListParams, int, e
 	url := *r.URL
 	copied.URL = &url
 	q.Del("limit")
+	q.Del("include_facts")
 	q.Set("raw", "false")
 	copied.URL.RawQuery = q.Encode()
 	p, _, e := h.traceWindowParams(copied)
+	p.OperationFacts = facts
 	return p, limit, e
 }
 
@@ -114,7 +124,11 @@ func (s *oceanBaseStore) traceOperationPage(ctx context.Context, org string, p n
 	}
 	data := []map[string]any{}
 	if selected > 0 {
-		query := "SELECT t.trace_id,c.observation_id,c.kind AS type,c.start_ns,s.source_revision,t.span_count" + calls + " ORDER BY c.start_ns DESC,BINARY t.trace_id DESC,BINARY c.observation_id DESC LIMIT ?"
+		columns := "t.trace_id,c.observation_id,c.kind AS type,c.start_ns,s.source_revision,t.span_count"
+		if p.OperationFacts {
+			columns += operationFactsColumnsSQL()
+		}
+		query := "SELECT " + columns + calls + " ORDER BY c.start_ns DESC,BINARY t.trace_id DESC,BINARY c.observation_id DESC LIMIT ?"
 		values := append(append([]any{}, args...), limit+1)
 		rows, e := scanReadModelRows(ctx, tx, query, values...)
 		if e != nil {
@@ -148,12 +162,31 @@ func (s *oceanBaseStore) traceOperationPage(ctx context.Context, org string, p n
 				return nil, fmt.Errorf("duplicate or out-of-order operation keys")
 			}
 			previousTime, previousTrace, previousID = at, trace, id
-			data = append(data, map[string]any{"trace_id": trace, "observation_id": id, "type": kind, "start_ns": strconv.FormatInt(at, 10), "source_revision": revision, "span_count": count})
+			item := map[string]any{"trace_id": trace, "observation_id": id, "type": kind, "start_ns": strconv.FormatInt(at, 10), "source_revision": revision, "span_count": count}
+			// The look-ahead key determines has_more only. Its preview is not
+			// needed for the selected page and cannot invalidate that page.
+			if p.OperationFacts && index < limit {
+				facts, preview, e := decodeOperationFacts(row)
+				if e != nil {
+					return readModelUnsupported("selected_operation_preview_unavailable"), nil
+				}
+				item["facts"], item["preview"] = facts, preview
+			}
+			data = append(data, item)
 		}
 	}
 	more := len(data) > limit
 	if more {
 		data = data[:limit]
+	}
+	if p.OperationFacts {
+		wire, err := json.Marshal(data)
+		if err != nil {
+			return nil, err
+		}
+		if len(wire) > sourcePageByteLimit-4096 {
+			return readModelUnsupported("operation_page_payload_limit"), nil
+		}
 	}
 	if e = tx.Commit(); e != nil {
 		return nil, e

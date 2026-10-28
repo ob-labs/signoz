@@ -32,6 +32,27 @@ func expectLifecycleBaseReady(mock sqlmock.Sqlmock, generation int64) {
 	mock.ExpectQuery("SELECT COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION").WithArgs("test_trace_projections", ingest.SessionTokenGeneratedBillableColumn).WillReturnRows(sqlmock.NewRows([]string{"kind", "extra", "expression"}).AddRow("tinyint(4)", "STORED GENERATED", ingest.SessionTokenGeneratedBillableExpr))
 }
 
+func expectLifecycleContentReady(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery("SELECT COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION").WithArgs("test_trace_projections", ingest.TraceContentCompleteColumn).WillReturnRows(sqlmock.NewRows([]string{"kind", "extra", "expression"}).AddRow("tinyint(4)", "STORED GENERATED", ingest.TraceContentCompleteExpression))
+}
+
+func TestProjectionLifecycleContentFailureDoesNotBlockReadyStatistics(t *testing.T) {
+	t.Setenv("SIGNOZ_AIVISION_PROJECTION_MAINTENANCE_ENABLED", "true")
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	expectLifecycleBaseReady(mock, 7)
+	expectLifecycleVersion(mock)
+	// Full existing statistics type/receipt/primary-key proof is consumed
+	// before an unrelated optional content definition is found incompatible.
+	expectLifecycleStatisticsReady(mock, true)
+	mock.ExpectQuery("SELECT COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION").WithArgs("test_trace_projections", ingest.TraceContentCompleteColumn).WillReturnRows(sqlmock.NewRows([]string{"kind", "extra", "expression"}).AddRow("tinyint", "", "1"))
+	complete, err := initializeModelsForLifecycle(context.Background(), db)
+	require.ErrorContains(t, err, "incompatible optional content-completeness column")
+	require.False(t, complete, "the worker must retry content readiness without invalidating statistics")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func expectLifecycleVersion(mock sqlmock.Sqlmock) {
 	mock.ExpectQuery("SELECT VERSION").WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow("5.7.25-OceanBase seekdb-v1.4.0.0"))
 }
@@ -54,6 +75,7 @@ func expectLifecycleSuspended(mock sqlmock.Sqlmock) {
 	expectLifecycleVersion(mock)
 	expectLifecycleStatisticsReady(mock, false)
 	mock.ExpectQuery("SELECT generation FROM .*enabled=TRUE.*suspended=FALSE").WillReturnError(sql.ErrNoRows)
+	expectLifecycleContentReady(mock)
 	// Nil from the optional initializer is not proof that the schema exists.
 	expectLifecycleVersion(mock)
 	expectLifecycleStatisticsReady(mock, false)
@@ -92,6 +114,7 @@ func TestProjectionLifecycleSuspendedStartResumesAfterTransientDDLFailure(t *tes
 	expectLifecycleBaseReady(mock, 8)
 	expectLifecycleVersion(mock)
 	expectLifecycleStatisticsReady(mock, true)
+	expectLifecycleContentReady(mock)
 	expectLifecycleVersion(mock)
 	expectLifecycleStatisticsReady(mock, true)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -148,9 +171,9 @@ func TestProjectionLifecycleUnsupportedEngineStopsWithoutOptionalSchema(t *testi
 	require.NoError(t, err)
 	defer db.Close()
 	expectLifecycleBaseReady(mock, 7)
-	for range 2 {
-		mock.ExpectQuery("SELECT VERSION").WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow("8.0.36-MySQL"))
-	}
+	mock.ExpectQuery("SELECT VERSION").WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow("8.0.36-MySQL"))
+	expectLifecycleContentReady(mock)
+	mock.ExpectQuery("SELECT VERSION").WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow("8.0.36-MySQL"))
 	complete, err := initializeModelsForLifecycle(context.Background(), db)
 	require.NoError(t, err)
 	require.True(t, complete)

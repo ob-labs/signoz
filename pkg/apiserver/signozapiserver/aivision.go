@@ -27,6 +27,7 @@ func (provider *provider) addAIVisionRoutes(router *mux.Router) error {
 	}{
 		{"traces", "GET", "Traces", h.Traces, traces},
 		{"traces/read-model/page", "GET", "ReadModelPage", h.ReadModel, traces},
+		{"traces/read-model/capabilities", "GET", "ReadModelCapabilities", h.ReadModel, traces},
 		{"traces/read-model/window", "GET", "ReadModelWindow", h.ReadModel, traces},
 		{"traces/read-model/metrics-window", "GET", "ReadModelMetricsWindow", h.ReadModel, traces},
 		{"traces/read-model/metrics-aggregate", "GET", "ReadModelMetricsAggregate", h.ReadModel, traces},
@@ -34,6 +35,7 @@ func (provider *provider) addAIVisionRoutes(router *mux.Router) error {
 		{"traces/read-model/batch-snapshot", "GET", "ReadModelBatchSnapshot", h.ReadModel, traces},
 		{"traces/read-model/sessions/page", "GET", "SessionReadModelPage", h.ReadModel, traces},
 		{"traces/read-model/snapshot", "GET", "ReadModelSnapshot", h.ReadModel, traces},
+		{"traces/read-model/source-page", "GET", "ReadModelSourcePage", h.ReadModel, traces},
 		{"traces/read-model/dirty", "GET", "ReadModelDirty", h.ReadModel, traces},
 		{"traces/page", "GET", "TracePage", h.TracePage, traces},
 		{"traces/facets", "GET", "TraceFacets", h.TraceFacets, traces},

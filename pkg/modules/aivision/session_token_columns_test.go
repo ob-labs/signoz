@@ -261,7 +261,7 @@ func TestSessionTokenGeneratedActualPagePath(t *testing.T) {
 			mock.ExpectBegin()
 			expectProjectionMaintenance(mock, true, false)
 			mock.ExpectQuery("SELECT complete FROM").WithArgs("org", "space").WillReturnRows(sqlmock.NewRows([]string{"complete"}).AddRow(true))
-			mock.ExpectQuery("SELECT COALESCE").WillReturnRows(sqlmock.NewRows([]string{"stale", "boundary"}).AddRow(0, 0))
+			mock.ExpectQuery("SELECT COALESCE").WillReturnRows(sqlmock.NewRows([]string{"stale", "boundary", "incomplete_content"}).AddRow(0, 0, 0))
 			failure := errors.New("metadata permission denied")
 			if tc.capability != "not_queried" {
 				expect := mock.ExpectQuery("SELECT COLUMN_NAME,COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION").WithArgs("test_trace_projections", sessionTokenGeneratedValueColumn, sessionTokenGeneratedBillableColumn)
