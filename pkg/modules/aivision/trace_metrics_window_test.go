@@ -3,6 +3,7 @@ package aivision
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -15,6 +16,31 @@ import (
 	"github.com/SigNoz/signoz/pkg/types/authtypes"
 	"github.com/stretchr/testify/require"
 )
+
+// Unsupported typed-statistics engines still need bounded selected-event IO;
+// carrying the published preview map must not reopen full raw IO transfer.
+func TestMetricsWindowPreservesBoundedOperationPreviewsWithoutRawIO(t *testing.T) {
+	previews := map[string]any{}
+	for i := 0; i < 200; i++ {
+		previews[fmt.Sprintf("%016x", i)] = map[string]any{"name": "operation", "latency": 1, "status": 1, "input": strings.Repeat("i", 1024), "output": strings.Repeat("o", 1024), "input_truncated": true, "output_truncated": true}
+	}
+	metrics := map[string]any{"version": "native-trace-metrics-v1", "observations": []any{}}
+	row := map[string]any{"trace_id": "abc", "span_count": 200, "usage": map[string]any{"total": json.Number("9007199254740993")}, "_metrics": metrics, "_operation_previews": previews}
+	for _, field := range []string{"input", "output", "attributes.gen_ai.input.messages", "attributes.gen_ai.output.messages", "ioPreview", "payload"} {
+		row[field] = strings.Repeat("raw", 1<<20)
+	}
+	compact := traceMetricsWindowRow(row)
+	require.Contains(t, compact, "_operation_previews")
+	require.Equal(t, previews, compact["_operation_previews"])
+	require.Equal(t, metrics, compact["_metrics"])
+	require.Equal(t, json.Number("9007199254740993"), compact["usage"].(map[string]any)["total"])
+	for _, field := range []string{"input", "output", "attributes.gen_ai.input.messages", "attributes.gen_ai.output.messages", "ioPreview", "payload"} {
+		require.NotContains(t, compact, field)
+	}
+	wire, err := json.Marshal(compact)
+	require.NoError(t, err)
+	require.Less(t, len(wire), 2<<20)
+}
 
 func runMetricsWindowRequest(t *testing.T, setup func(sqlmock.Sqlmock)) map[string]any {
 	t.Helper()

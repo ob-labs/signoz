@@ -18,13 +18,7 @@ const sessionPagePayloadLimit = 16 << 20
 // Session lists consume canonical summary evidence only. A whitelist also
 // excludes duplicated SDK input/output attributes and future raw aliases.
 func sessionSummarySQL() string {
-	fields := []string{"trace_id", "name", "userId", "session_id", "environment", "environmentSource", "start_time_unix_nano", "end_time_unix_nano", "duration_ms", "status_code", "span_count", "usage", "coverage", "reportedUsage", "rootObservationId", "rootSelectionReason", "missingParentIds", "total_tokens", "_traceTags", "_sceneValues", "resource.attributes.aivision.agent.id", "resource.attributes.aivision.space.id", "resource.attributes.ant.agent.product", "attributes.gen_ai.request.model"}
-	values := make([]string, 0, len(fields)*2)
-	for _, field := range fields {
-		path, _ := json.Marshal(field)
-		values = append(values, "'"+field+"'", "JSON_EXTRACT(p.row_json,'$."+string(path)+"')")
-	}
-	return "JSON_OBJECT(" + strings.Join(values, ",") + ")"
+	return readModelRowJSONSQL(true)
 }
 
 type sessionReadModelParams struct {
@@ -249,8 +243,17 @@ func (s *oceanBaseStore) sessionReadModelCoverage(ctx context.Context, tx *sql.T
 		return "", err
 	}
 	from, to := p.From*1000000, p.To*1000000
-	query := `SELECT COALESCE(SUM(CASE WHEN s.scope_valid=FALSE OR s.dirty=TRUE OR p.trace_id IS NULL OR p.source_revision<>s.source_revision OR p.semantics_version<>1 OR p.projection_context<>? THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN s.min_timestamp<? OR s.max_timestamp>=? THEN 1 ELSE 0 END),0) FROM ` + s.readModelTable("trace_sources") + ` s LEFT JOIN ` + s.readModelTable("trace_projections") + ` p ON p.org_id=s.org_id AND p.space_id=s.space_id AND p.trace_id=s.trace_id WHERE s.org_id=? AND s.space_id=? AND ((s.min_timestamp<? AND s.max_timestamp>=?) OR (p.period>=? AND p.period<?))`
-	args := []any{p.ProjectionContext, from, to, org, p.SpaceID, to, from, p.From, p.To}
+	requireContent := p.Keyword != ""
+	generatedContent, _, err := s.contentCoverageCapability(ctx, tx, requireContent)
+	if err != nil {
+		return "", err
+	}
+	query := `SELECT COALESCE(SUM(CASE WHEN s.scope_valid=FALSE OR s.dirty=TRUE OR p.trace_id IS NULL OR p.source_revision<>s.source_revision OR p.semantics_version<>1 OR p.projection_context<>? THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN s.min_timestamp<? OR s.max_timestamp>=? THEN 1 ELSE 0 END),0),` + projectionIncompleteContentSQL(requireContent, generatedContent) + ` FROM ` + s.readModelTable("trace_sources") + ` s LEFT JOIN ` + s.readModelTable("trace_projections") + ` p ON p.org_id=s.org_id AND p.space_id=s.space_id AND p.trace_id=s.trace_id WHERE s.org_id=? AND s.space_id=? AND ((s.min_timestamp<? AND s.max_timestamp>=?) OR (p.period>=? AND p.period<?))`
+	args := []any{p.ProjectionContext, from, to}
+	if requireContent {
+		args = append(args, p.AgentUUID)
+	}
+	args = append(args, org, p.SpaceID, to, from, p.From, p.To)
 	if p.User != "" || p.AgentProduct != "" {
 		current, prior := []string{}, []string{"p.trace_id IS NOT NULL"}
 		currentArgs, priorArgs := []any{}, []any{}
@@ -266,8 +269,8 @@ func (s *oceanBaseStore) sessionReadModelCoverage(ctx context.Context, tx *sql.T
 		args = append(args, currentArgs...)
 		args = append(args, priorArgs...)
 	}
-	var stale, boundary int64
-	if err := tx.QueryRowContext(ctx, query, args...).Scan(&stale, &boundary); err != nil {
+	var stale, boundary, incompleteContent int64
+	if err := tx.QueryRowContext(ctx, query, args...).Scan(&stale, &boundary, &incompleteContent); err != nil {
 		return "", err
 	}
 	if boundary > 0 {
@@ -276,12 +279,15 @@ func (s *oceanBaseStore) sessionReadModelCoverage(ctx context.Context, tx *sql.T
 	if stale > 0 {
 		return "projection_coverage_stale", nil
 	}
+	if incompleteContent > 0 {
+		return "content_projection_incomplete", nil
+	}
 	return "", nil
 }
 
 // Batch only the selected page's bounded summaries. Group selection, matching,
 // counts and facets remain in the same repeatable-read transaction as before.
-func sessionPageBatchRows(ctx context.Context, tx *sql.Tx, table, scope string, scopeArgs []any, match string, matchArgs []any, groups []map[string]any, limit int) (map[string][]map[string]any, string, error) {
+func sessionPageBatchRows(ctx context.Context, tx *sql.Tx, table, scope string, scopeArgs []any, match string, matchArgs []any, groups []map[string]any, limit int, includeContent bool) (map[string][]map[string]any, string, error) {
 	result := make(map[string][]map[string]any, len(groups))
 	if len(groups) > 50 || len(groups) > limit {
 		return nil, "", fmt.Errorf("invalid session group page size")
@@ -319,6 +325,9 @@ func sessionPageBatchRows(ctx context.Context, tx *sql.Tx, table, scope string, 
 	where := scope + " AND (" + strings.Join(clauses, " OR ") + ")"
 	args := append(append([]any{}, scopeArgs...), idArgs...)
 	prunedRow := sessionSummarySQL()
+	if includeContent {
+		prunedRow = readModelRowJSONSQL(false)
+	}
 	preflight, err := scanReadModelRows(ctx, tx, "SELECT p.session_id,COUNT(*) AS trace_count,COALESCE(SUM(OCTET_LENGTH("+prunedRow+")+OCTET_LENGTH(p.preview_json)+100),0) AS selected_bytes FROM "+table+" p WHERE "+where+" GROUP BY BINARY p.session_id,p.session_id", args...)
 	if err != nil {
 		return nil, "", err
@@ -440,7 +449,7 @@ func (s *oceanBaseStore) sessionReadModelPage(ctx context.Context, org string, p
 		return nil, err
 	}
 	match, matchArgs := sessionMatchSQL(p, "")
-	batchRows, reason, err := sessionPageBatchRows(ctx, tx, table, scope, scopeArgs, match, matchArgs, groups, p.Limit)
+	batchRows, reason, err := sessionPageBatchRows(ctx, tx, table, scope, scopeArgs, match, matchArgs, groups, p.Limit, p.Keyword != "")
 	if err != nil {
 		return nil, err
 	}
@@ -477,7 +486,9 @@ func (s *oceanBaseStore) sessionReadModelPage(ctx context.Context, org string, p
 				return nil, fmt.Errorf("invalid session preview row: %w", e)
 			}
 			canonical["ioPreview"], canonical["sourceRevision"] = preview, raw["source_revision"]
-			canonical["attributes.gen_ai.input.messages"], canonical["attributes.gen_ai.output.messages"] = preview["input"], preview["output"]
+			if p.Keyword == "" {
+				canonical["attributes.gen_ai.input.messages"], canonical["attributes.gen_ai.output.messages"] = nil, nil
+			}
 			if canonical["session_id"] != sid {
 				return nil, fmt.Errorf("session projection identity mismatch")
 			}

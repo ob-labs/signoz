@@ -37,6 +37,8 @@ type nativeListParams struct {
 	Scene             string
 	Username          string
 	IncludeSpans      bool
+	OperationFacts    bool
+	MetadataOnly      bool
 }
 
 const nativeSpanProjection = `trace_id,

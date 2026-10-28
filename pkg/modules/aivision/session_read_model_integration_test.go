@@ -140,7 +140,7 @@ func TestOceanBaseCanonicalSessionReadModel(t *testing.T) {
 	require.Len(t, groups[0]["traces"], 3)
 	require.Equal(t, []string{fmt.Sprintf("%032x", 2)}, groups[0]["matchedTraceIds"])
 	row := groups[0]["traces"].([]map[string]any)[0]
-	require.Equal(t, row["ioPreview"].(map[string]any)["input"], row["attributes.gen_ai.input.messages"], "full root IO must not leave indexed session pages")
+	require.Nil(t, row["attributes.gen_ai.input.messages"], "metadata session pages retain null IO placeholders and a separate bounded preview")
 	for _, key := range []string{"attributes.langfuse.trace.input", "attributes.langfuse.trace.output", "observation.input", "observation.output", "attributes.eino.input"} {
 		require.NotContains(t, row, key, "raw aliases must be absent from the storage summary whitelist")
 	}

@@ -119,6 +119,23 @@ func validateTraceProjection(p traceProjection) error {
 	if _, ok := row["spans"]; ok {
 		return fmt.Errorf("invalid projection: spans are not a canonical row")
 	}
+	if complete, present := row["_contentComplete"]; present {
+		if _, ok := complete.(bool); !ok {
+			return fmt.Errorf("invalid projection content completeness")
+		}
+	}
+	if previews, present := row["_operation_previews"]; present {
+		values, ok := previews.(map[string]any)
+		if !ok || int64(len(values)) > p.NodeCount {
+			return fmt.Errorf("invalid projection operation previews")
+		}
+		for id, value := range values {
+			preview, ok := value.(map[string]any)
+			if id == "" || len(id) > 255 || !ok || validateOperationPreview(preview) != nil {
+				return fmt.Errorf("invalid projection operation preview")
+			}
+		}
+	}
 	for _, tag := range append(append([]string{}, p.Tags...), p.SceneValues...) {
 		if len(tag) > 1024 {
 			return fmt.Errorf("invalid projection tag")
@@ -164,16 +181,44 @@ func (h *handler) ReadModel(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	action := strings.TrimPrefix(r.URL.Path, "/api/v1/ai-vision/traces/read-model/")
+	if action == "capabilities" {
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w, http.MethodGet)
+			return
+		}
+		if r.URL.RawQuery != "" {
+			writeAPIError(w, http.StatusBadRequest, "bad_data", "capabilities does not accept query parameters")
+			return
+		}
+		// This describes the server protocol, independently of database health
+		// or optional schema readiness. Actual readers retain their own gates.
+		writeJSON(w, http.StatusOK, map[string]any{"supported": true, "contract": "native-trace-performance-capabilities-v1", "content_projection": "native-trace-content-v1", "operation_facts": true, "source_pages": true})
+		return
+	}
 	if reason := h.backend.readModelUnavailable(); reason != "" {
 		writeJSON(w, 200, readModelUnsupported(reason))
 		return
 	}
-	action := strings.TrimPrefix(r.URL.Path, "/api/v1/ai-vision/traces/read-model/")
 	ctx, cancel := context.WithTimeout(r.Context(), readModelRequestTimeout(action, h.cfg.QueryTimeout))
 	defer cancel()
 	var result any
 	var err error
 	switch action {
+	case "source-page":
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w, http.MethodGet)
+			return
+		}
+		for key, values := range r.URL.Query() {
+			if (key != "space_id" && key != "trace_id" && key != "cursor") || len(values) != 1 {
+				err = fmt.Errorf("invalid source page parameter: %s", key)
+				break
+			}
+		}
+		if err == nil {
+			result, err = h.backend.traceSourcePage(ctx, org, r.URL.Query().Get("space_id"), r.URL.Query().Get("trace_id"), r.URL.Query().Get("cursor"))
+		}
 	case "operation-page":
 		if r.Method != http.MethodGet {
 			methodNotAllowed(w, http.MethodGet)
@@ -236,8 +281,13 @@ func (h *handler) ReadModel(w http.ResponseWriter, r *http.Request) {
 			err = ingest.ResumeProjectionMaintenance(ctx, h.backend.db, h.backend.cfg.TablePrefix)
 			if err == nil {
 				result = map[string]any{"supported": true, "resumed": true}
+				// Restore existing statistics before optional content work can
+				// consume the shared operator-request deadline.
 				if optionalErr := ingest.InitializeTraceStatistics(ctx, h.backend.db, h.backend.cfg.TablePrefix); optionalErr != nil && h.logger != nil {
 					h.logger.Warn("optional statistics initialization after maintenance resume failed; complete metrics fallback retained", "error", optionalErr)
+				}
+				if optionalErr := ingest.InitializeTraceContentColumn(ctx, h.backend.db, h.backend.cfg.TablePrefix); optionalErr != nil && h.logger != nil {
+					h.logger.Warn("optional content coverage initialization after maintenance resume failed; JSON coverage retained", "error", optionalErr)
 				}
 			}
 		}
@@ -319,7 +369,7 @@ func (h *handler) ReadModel(w http.ResponseWriter, r *http.Request) {
 		}
 	case "page":
 		allowed := map[string]bool{}
-		for _, key := range []string{"from", "to", "space_id", "agent_uuid", "agent_product", "user", "page", "limit", "orderBy", "order_by", "filters", "keyword", "searchType", "search_type", "input_keyword", "tags", "env", "scene", "username", "trace_id", "projection_context"} {
+		for _, key := range []string{"from", "to", "space_id", "agent_uuid", "agent_product", "user", "page", "limit", "orderBy", "order_by", "filters", "keyword", "searchType", "search_type", "input_keyword", "tags", "env", "scene", "username", "trace_id", "projection_context", "metadata_only"} {
 			allowed[key] = true
 		}
 		for key := range r.URL.Query() {
@@ -332,6 +382,13 @@ func (h *handler) ReadModel(w http.ResponseWriter, r *http.Request) {
 		p, err = h.nativeParams(r)
 		if err == nil {
 			q := r.URL.Query()
+			if values, present := q["metadata_only"]; present {
+				if len(values) != 1 || (values[0] != "true" && values[0] != "false") {
+					err = fmt.Errorf("metadata_only must be true or false")
+				} else {
+					p.MetadataOnly = values[0] == "true"
+				}
+			}
 			p.ProjectionContext = q.Get("projection_context")
 			p.AgentUUID = q.Get("agent_uuid")
 			p.TraceID = q.Get("trace_id")
@@ -858,6 +915,17 @@ func readModelWhere(org string, p nativeListParams) (string, []any, error) {
 	}
 	columns := map[string]string{"duration": "duration", "duration_ms": "duration", "latency": "duration", "node_count": "node_count", "nodeCount": "node_count", "span_count": "node_count", "status_code": "status", "status": "status", "userId": "username", "environment": "environment", "name": "name", "period": "period", "trace_id": "trace_id"}
 	for _, filter := range p.Filters {
+		if filter.Field == "total_tokens" || filter.Field == "attributes.gen_ai.usage.total_tokens" {
+			// Session helper tool-only zero and canonical unknown both fail a
+			// positive minimum. No such equivalence is claimed for =0/IS_NULL.
+			number, err := strconv.ParseInt(fmt.Sprint(filter.Value), 10, 64)
+			if err != nil || filter.Op != ">=" || number < 100 || number > 9007199254740991 {
+				return "", nil, tracePageUnsupported{"unsupported_token_minimum"}
+			}
+			where = append(where, "p."+sessionTokenGeneratedValueColumn+">=?")
+			args = append(args, number)
+			continue
+		}
 		column, ok := columns[filter.Field]
 		if !ok {
 			return "", nil, tracePageUnsupported{"unsupported_filter_field:" + filter.Field}
@@ -993,6 +1061,18 @@ func (s *oceanBaseStore) readModelPage(ctx context.Context, org string, p native
 	} else if reason != "" {
 		return readModelUnsupported(reason), nil
 	}
+	for _, filter := range p.Filters {
+		if filter.Field == "total_tokens" || filter.Field == "attributes.gen_ai.usage.total_tokens" {
+			ready, reason, err := s.sessionTokenGeneratedCapability(ctx, tx)
+			if err != nil {
+				return nil, err
+			}
+			if !ready {
+				return readModelUnsupported(reason), nil
+			}
+			break
+		}
+	}
 	var covered bool
 	err = tx.QueryRowContext(ctx, "SELECT complete FROM "+s.readModelTable("trace_projection_coverage")+" WHERE org_id=? AND space_id=?", org, p.SpaceID).Scan(&covered)
 	if err == sql.ErrNoRows || err == nil && !covered {
@@ -1003,10 +1083,19 @@ func (s *oceanBaseStore) readModelPage(ctx context.Context, org string, p native
 	}
 	sources := s.readModelTable("trace_sources")
 	projections := s.readModelTable("trace_projections")
-	var stale, boundary int64
-	coverageSQL := `SELECT COALESCE(SUM(CASE WHEN s.scope_valid=FALSE OR s.dirty=TRUE OR p.trace_id IS NULL OR p.source_revision<>s.source_revision OR p.semantics_version<>1 OR p.projection_context<>? THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN s.min_timestamp<? OR s.max_timestamp>=? THEN 1 ELSE 0 END),0) FROM ` + sources + ` s LEFT JOIN ` + projections + ` p ON p.org_id=s.org_id AND p.space_id=s.space_id AND p.trace_id=s.trace_id WHERE s.org_id=? AND s.space_id=? AND ((s.min_timestamp<? AND s.max_timestamp>=?) OR (p.period>=? AND p.period<?))`
+	var stale, boundary, incompleteContent int64
+	requireContent := readModelContentRequired(p)
+	generatedContent, contentStrategy, err := s.contentCoverageCapability(ctx, tx, requireContent)
+	if err != nil {
+		return nil, err
+	}
+	coverageSQL := `SELECT COALESCE(SUM(CASE WHEN s.scope_valid=FALSE OR s.dirty=TRUE OR p.trace_id IS NULL OR p.source_revision<>s.source_revision OR p.semantics_version<>1 OR p.projection_context<>? THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN s.min_timestamp<? OR s.max_timestamp>=? THEN 1 ELSE 0 END),0),` + projectionIncompleteContentSQL(requireContent, generatedContent) + ` FROM ` + sources + ` s LEFT JOIN ` + projections + ` p ON p.org_id=s.org_id AND p.space_id=s.space_id AND p.trace_id=s.trace_id WHERE s.org_id=? AND s.space_id=? AND ((s.min_timestamp<? AND s.max_timestamp>=?) OR (p.period>=? AND p.period<?))`
 	from, to := p.From*1000000, p.To*1000000
-	coverageArgs := []any{p.ProjectionContext, from, to, org, p.SpaceID, to, from, p.From, p.To}
+	coverageArgs := []any{p.ProjectionContext, from, to}
+	if requireContent {
+		coverageArgs = append(coverageArgs, p.AgentUUID)
+	}
+	coverageArgs = append(coverageArgs, org, p.SpaceID, to, from, p.From, p.To)
 	// A correction can move a source to a new physical authorization scope
 	// while the prior projection still belongs to the old scope. Coverage must
 	// include both complete scope tuples before Agent matching; otherwise the
@@ -1030,7 +1119,7 @@ func (s *oceanBaseStore) readModelPage(ctx context.Context, org string, p native
 		coverageArgs = append(coverageArgs, currentArgs...)
 		coverageArgs = append(coverageArgs, priorArgs...)
 	}
-	if err := tx.QueryRowContext(ctx, coverageSQL, coverageArgs...).Scan(&stale, &boundary); err != nil {
+	if err := tx.QueryRowContext(ctx, coverageSQL, coverageArgs...).Scan(&stale, &boundary, &incompleteContent); err != nil {
 		return nil, err
 	}
 	if boundary > 0 {
@@ -1038,6 +1127,9 @@ func (s *oceanBaseStore) readModelPage(ctx context.Context, org string, p native
 	}
 	if stale > 0 {
 		return readModelUnsupported("projection_coverage_stale"), nil
+	}
+	if incompleteContent > 0 {
+		return readModelUnsupported("content_projection_incomplete"), nil
 	}
 	var total int
 	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+projections+" p WHERE "+where, args...).Scan(&total); err != nil {
@@ -1056,7 +1148,9 @@ func (s *oceanBaseStore) readModelPage(ctx context.Context, org string, p native
 		}
 	}
 	listArgs := append(append([]any{}, args...), p.Limit, (p.Page-1)*p.Limit)
-	rows, err := scanReadModelRows(ctx, tx, "SELECT p.row_json,p.preview_json,p.source_revision FROM "+projections+" p WHERE "+where+" ORDER BY "+order+" LIMIT ? OFFSET ?", listArgs...)
+	// Optional per-operation facts belong to bounded operation/metrics readers,
+	// not to each list row. Remove them in SQL before any row reaches Go.
+	rows, err := scanReadModelRows(ctx, tx, "SELECT "+readModelRowJSONSQL(p.MetadataOnly)+" AS row_json,p.preview_json,p.source_revision FROM "+projections+" p WHERE "+where+" ORDER BY "+order+" LIMIT ? OFFSET ?", listArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -1102,6 +1196,7 @@ func (s *oceanBaseStore) readModelPage(ctx context.Context, org string, p native
 		return nil, err
 	}
 	meta := map[string]any{"contract": traceReadModelContract, "queryMode": "read_model", "queryContract": traceReadModelContract, "environmentSemantics": "root-span-resource-v1", "userIdentitySemantics": "trace-sdk-user-id-v1", "complete": true, "projection_context": p.ProjectionContext, "from": p.From, "to": p.To, "space_id": p.SpaceID, "agent_product": p.AgentProduct, "user": p.User, "agent_uuid": p.AgentUUID, "page": p.Page, "limit": p.Limit, "totalItems": total, "windowTotalItems": windowTotal, "totalPages": (total + p.Limit - 1) / p.Limit}
+	meta["contentCoverageStrategy"] = contentStrategy
 	return map[string]any{"supported": true, "data": data, "facets": facets, "meta": meta}, nil
 }
 

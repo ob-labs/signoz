@@ -84,7 +84,7 @@ func TestSessionReadModelRejectsOversizedGroupWithoutTruncation(t *testing.T) {
 	mock.ExpectBegin()
 	expectProjectionMaintenance(mock, true, false)
 	mock.ExpectQuery("SELECT complete FROM").WillReturnRows(sqlmock.NewRows([]string{"complete"}).AddRow(true))
-	mock.ExpectQuery("SELECT COALESCE").WillReturnRows(sqlmock.NewRows([]string{"stale", "boundary"}).AddRow(0, 0))
+	mock.ExpectQuery("SELECT COALESCE").WillReturnRows(sqlmock.NewRows([]string{"stale", "boundary", "incomplete_content"}).AddRow(0, 0, 0))
 	mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectQuery("SELECT session_id,COUNT").WillReturnRows(sqlmock.NewRows([]string{"session_id", "trace_count", "last_activity"}).AddRow("large-session", sessionPageTraceLimit+1, 123))
@@ -136,7 +136,7 @@ func TestSessionReadModelRejectsPayloadBeforeMaterializingRows(t *testing.T) {
 	mock.ExpectBegin()
 	expectProjectionMaintenance(mock, true, false)
 	mock.ExpectQuery("SELECT complete FROM").WillReturnRows(sqlmock.NewRows([]string{"complete"}).AddRow(true))
-	mock.ExpectQuery("SELECT COALESCE").WillReturnRows(sqlmock.NewRows([]string{"stale", "boundary"}).AddRow(0, 0))
+	mock.ExpectQuery("SELECT COALESCE").WillReturnRows(sqlmock.NewRows([]string{"stale", "boundary", "incomplete_content"}).AddRow(0, 0, 0))
 	mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectQuery("SELECT session_id,COUNT").WillReturnRows(sqlmock.NewRows([]string{"session_id", "trace_count", "last_activity"}).AddRow("large-session", 1, 123))
@@ -196,7 +196,7 @@ func TestSessionTokenQueryStrategyUsesActualPagePath(t *testing.T) {
 			mock.ExpectBegin()
 			expectProjectionMaintenance(mock, true, false)
 			mock.ExpectQuery("SELECT complete FROM").WithArgs("org", "space").WillReturnRows(sqlmock.NewRows([]string{"complete"}).AddRow(true))
-			mock.ExpectQuery("SELECT COALESCE").WillReturnRows(sqlmock.NewRows([]string{"stale", "boundary"}).AddRow(0, 0))
+			mock.ExpectQuery("SELECT COALESCE").WillReturnRows(sqlmock.NewRows([]string{"stale", "boundary", "incomplete_content"}).AddRow(0, 0, 0))
 			if tc.threshold != nil {
 				mock.ExpectQuery("SELECT COLUMN_NAME,COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION").WillReturnRows(sqlmock.NewRows([]string{"COLUMN_NAME", "COLUMN_TYPE", "EXTRA", "GENERATION_EXPRESSION"}))
 			}

@@ -106,6 +106,12 @@ func initializeProjectionModels(ctx context.Context, db *sql.DB, prefix string) 
 	if err := ingest.InitializeTraceStatistics(ctx, db, prefix); err != nil {
 		return false, err
 	}
+	// Keep the existing statistics initializer independent of this optional
+	// helper. Content failure retains JSON coverage and a pending retry; it must
+	// not prevent otherwise supported statistics from becoming usable.
+	if err := ingest.InitializeTraceContentColumn(ctx, db, prefix); err != nil {
+		return false, err
+	}
 	// A nil initializer result can also mean durable OFF. Keep the provider's
 	// worker pending until supported optional storage is actually ready, so a
 	// later explicit resume can recover from a transient DDL failure by itself.
