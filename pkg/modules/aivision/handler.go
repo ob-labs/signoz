@@ -531,6 +531,7 @@ func (h *handler) nativeParams(request *http.Request) (nativeListParams, error) 
 	params.Scene = strings.TrimSpace(query.Get("scene"))
 	params.Username = strings.TrimSpace(query.Get("username"))
 	params.IncludeSpans = isTruthyNativeParam(query.Get("include_spans"))
+	params.SpansOnly = isTruthyNativeParam(query.Get("spans_only"))
 
 	var err error
 	if params.Fields, err = parseNativeStringList(query["fields"]); err != nil {

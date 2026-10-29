@@ -39,6 +39,7 @@ type nativeListParams struct {
 	IncludeSpans      bool
 	OperationFacts    bool
 	MetadataOnly      bool
+	SpansOnly         bool
 }
 
 const nativeSpanProjection = `trace_id,
@@ -931,12 +932,13 @@ func mcpToolPredicateSQL() string {
 // not. Native reports match the authoritative attribute; derived shapes
 // surface through any of the argument payload keys naming a SKILL.md path.
 func skillSpanPredicateSQL() string {
+	// Extract the argument candidates together instead of reparsing the same
+	// potentially large attribute document for each supported argument key.
+	arguments := `JSON_EXTRACT(attributes, '$."agentic.tool.call.arguments"', '$."gen_ai.tool.call.arguments"', '$."gen_ai.tool.call.input"')`
 	return "(" +
 		traceAttributeTextSQL("agentic.tool.type") + " = 'skill' OR " +
 		"COALESCE(" + traceAttributeTextSQL("agentic.skill.name") + ", '') != '' OR " +
-		"POSITION('SKILL.md' IN " + traceAttributeTextSQL("agentic.tool.call.arguments") + ") > 0 OR " +
-		"POSITION('SKILL.md' IN " + traceAttributeTextSQL("gen_ai.tool.call.arguments") + ") > 0 OR " +
-		"POSITION('SKILL.md' IN " + traceAttributeTextSQL("gen_ai.tool.call.input") + ") > 0)"
+		"POSITION('SKILL.md' IN " + arguments + ") > 0)"
 }
 
 func (store *oceanBaseStore) listTraceFacets(ctx context.Context, orgID string, params nativeListParams) (nativeFacets, error) {
@@ -1224,34 +1226,17 @@ func (store *oceanBaseStore) listMcpTools(ctx context.Context, orgID string, par
 
 	where += " AND (" + mcpToolPredicateSQL() + ")"
 
-	spanTotalRows, err := store.queryRows(
-		ctx,
-		`SELECT COUNT(*) AS total_items FROM `+store.tracesTable()+` WHERE `+where,
-		args...,
-	)
+	spanPage, err := store.listCandidateSpans(ctx, params, where, args)
 	if err != nil {
 		return nativeMcpToolsResponse{}, err
 	}
-	spanTotal, err := firstInt(spanTotalRows, "total_items")
-	if err != nil {
-		return nativeMcpToolsResponse{}, err
-	}
-
-	spanOffset := (params.Page - 1) * params.Limit
-	spanRows, err := store.queryRows(
-		ctx,
-		"SELECT "+nativeSpanProjection+" FROM "+store.tracesTable()+
-			" WHERE "+where+" ORDER BY timestamp DESC LIMIT ? OFFSET ?",
-		append(args, params.Limit, spanOffset)...,
-	)
-	if err != nil {
-		return nativeMcpToolsResponse{}, err
-	}
-	for _, row := range spanRows {
-		if resource, ok := row["resource_attributes"]; ok {
-			row["resource"] = resource
-		}
-		normalizeNativeSpan(row)
+	if params.SpansOnly {
+		return nativeMcpToolsResponse{
+			Data:     []nativeMcpToolSummary{},
+			Meta:     buildPageMeta(params.Page, params.Limit, 0),
+			Spans:    spanPage.Spans,
+			SpanMeta: spanPage.SpanMeta,
+		}, nil
 	}
 
 	totalRows, err := store.queryRows(
@@ -1332,8 +1317,8 @@ LIMIT ? OFFSET ?`,
 	return nativeMcpToolsResponse{
 		Data:     data,
 		Meta:     buildPageMeta(params.Page, params.Limit, int(total)),
-		Spans:    spanRows,
-		SpanMeta: buildPageMeta(params.Page, params.Limit, int(spanTotal)),
+		Spans:    spanPage.Spans,
+		SpanMeta: spanPage.SpanMeta,
 	}, nil
 }
 
@@ -1349,30 +1334,37 @@ func (store *oceanBaseStore) listSkillSpans(ctx context.Context, orgID string, p
 
 	where += " AND (" + skillSpanPredicateSQL() + ")"
 
-	spanTotalRows, err := store.queryRows(
-		ctx,
-		`SELECT COUNT(*) AS total_items FROM `+store.tracesTable()+` WHERE `+where,
-		args...,
-	)
-	if err != nil {
-		return nativeSkillSpansResponse{}, err
-	}
-	spanTotal, err := firstInt(spanTotalRows, "total_items")
-	if err != nil {
-		return nativeSkillSpansResponse{}, err
-	}
+	return store.listCandidateSpans(ctx, params, where, args)
+}
 
+func (store *oceanBaseStore) listCandidateSpans(ctx context.Context, params nativeListParams, where string, args []any) (nativeSkillSpansResponse, error) {
 	spanOffset := (params.Page - 1) * params.Limit
+	// Count and page share one storage snapshot and evaluate the JSON predicate
+	// once. Only an empty page beyond page one needs a separate count.
 	spanRows, err := store.queryRows(
 		ctx,
-		"SELECT "+nativeSpanProjection+" FROM "+store.tracesTable()+
+		"SELECT COUNT(*) OVER () AS candidate_total, "+nativeSpanProjection+" FROM "+store.tracesTable()+
 			" WHERE "+where+" ORDER BY timestamp DESC, trace_id DESC, span_id DESC LIMIT ? OFFSET ?",
 		append(args, params.Limit, spanOffset)...,
 	)
 	if err != nil {
 		return nativeSkillSpansResponse{}, err
 	}
+	var spanTotal int64
+	if len(spanRows) > 0 {
+		spanTotal, err = firstInt(spanRows, "candidate_total")
+	} else if spanOffset > 0 {
+		var counts []map[string]any
+		counts, err = store.queryRows(ctx, "SELECT COUNT(*) AS total_items FROM "+store.tracesTable()+" WHERE "+where, args...)
+		if err == nil {
+			spanTotal, err = firstInt(counts, "total_items")
+		}
+	}
+	if err != nil {
+		return nativeSkillSpansResponse{}, err
+	}
 	for _, row := range spanRows {
+		delete(row, "candidate_total")
 		if resource, ok := row["resource_attributes"]; ok {
 			row["resource"] = resource
 		}
