@@ -57,3 +57,20 @@ func TestProjectionBootstrapStandaloneFailureRemainsVisible(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestProjectionSummaryBootstrapManagedProviderRemainsSoleOwner(t *testing.T) {
+	for _, disabled := range []bool{false, true} {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := Config{TablePrefix: "test", ProjectionMaintenanceManaged: true, ProjectionMaintenanceDisabled: disabled}
+		if err := initializeProjectionSummaries(context.Background(), db, cfg); err != nil {
+			t.Fatalf("managed router must not repeat optional DDL or contend with provider retry: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatal(err)
+		}
+		db.Close()
+	}
+}

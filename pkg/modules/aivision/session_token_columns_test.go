@@ -229,7 +229,7 @@ func TestSessionTokenGeneratedActualPagePath(t *testing.T) {
 					wantJSONTable := expected == "group_consumer" && tc.strategy == "json_table"
 					generatedValue := strings.Contains(actual, "p."+sessionTokenGeneratedValueColumn)
 					generatedBillable := strings.Contains(actual, "p."+sessionTokenGeneratedBillableColumn)
-					jsonTable := strings.Contains(actual, "JSON_TABLE(p.row_json,")
+					jsonTable := strings.Contains(actual, "JSON_TABLE(p.metadata_json_v1,")
 					if generatedValue != wantGenerated || generatedBillable != wantGenerated || jsonTable != wantJSONTable {
 						return fmt.Errorf("wrong group strategy: generatedValue=%t billable=%t JSON_TABLE=%t", generatedValue, generatedBillable, jsonTable)
 					}
@@ -260,6 +260,7 @@ func TestSessionTokenGeneratedActualPagePath(t *testing.T) {
 			params.MinTotalTokens = tc.threshold
 			mock.ExpectBegin()
 			expectProjectionMaintenance(mock, true, false)
+			expectProjectionSummaryCapability(mock)
 			mock.ExpectQuery("SELECT complete FROM").WithArgs("org", "space").WillReturnRows(sqlmock.NewRows([]string{"complete"}).AddRow(true))
 			mock.ExpectQuery("SELECT COALESCE").WillReturnRows(sqlmock.NewRows([]string{"stale", "boundary", "incomplete_content"}).AddRow(0, 0, 0))
 			failure := errors.New("metadata permission denied")

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/SigNoz/signoz/pkg/ingest"
 	"github.com/SigNoz/signoz/pkg/valuer"
 	"github.com/stretchr/testify/require"
 )
@@ -25,7 +26,7 @@ func TestOceanBaseSessionTokenQuerySemantics(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	ctx := context.Background()
 	table := "`session_token_" + strings.ReplaceAll(valuer.GenerateUUID().StringValue(), "-", "")[:12] + "`"
-	_, err = db.ExecContext(ctx, "CREATE TABLE "+table+" (session_id VARCHAR(128),org_id VARCHAR(128),space_id VARCHAR(128),agent_uuid VARCHAR(128),agent_product VARCHAR(128),user_id VARCHAR(128),start_ns BIGINT,end_ns BIGINT,status INT,row_json LONGTEXT NOT NULL)")
+	_, err = db.ExecContext(ctx, "CREATE TABLE "+table+" (session_id VARCHAR(128),org_id VARCHAR(128),space_id VARCHAR(128),agent_uuid VARCHAR(128),agent_product VARCHAR(128),user_id VARCHAR(128),start_ns BIGINT,end_ns BIGINT,status INT,row_json LONGTEXT NOT NULL,"+ingest.TraceProjectionMetadataColumn+" LONGTEXT GENERATED ALWAYS AS ("+ingest.TraceProjectionMetadataExpression+") STORED)")
 	require.NoError(t, err)
 	t.Cleanup(func() { _, e := db.Exec("DROP TABLE IF EXISTS " + table); require.NoError(t, e) })
 	fixtures := []struct {
@@ -54,7 +55,7 @@ func TestOceanBaseSessionTokenQuerySemantics(t *testing.T) {
 		{"array_billable", `{"coverage":{"billableCalls":[1,2]},"usage":{"total":7}}`, "7", 1, 1},
 	}
 	insert := func(sid, document string) {
-		_, e := db.ExecContext(ctx, "INSERT INTO "+table+" VALUES (?,?,?,?,?,?,?,?,?,?)", sid, "org", "space", "agent", "product", "owner", 100000000, 101000000, 1, document)
+		_, e := db.ExecContext(ctx, "INSERT INTO "+table+" (session_id,org_id,space_id,agent_uuid,agent_product,user_id,start_ns,end_ns,status,row_json) VALUES (?,?,?,?,?,?,?,?,?,?)", sid, "org", "space", "agent", "product", "owner", 100000000, 101000000, 1, document)
 		require.NoError(t, e)
 	}
 	for _, fixture := range fixtures {

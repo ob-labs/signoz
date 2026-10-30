@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+
+	"github.com/SigNoz/signoz/pkg/ingest"
 )
 
 const sessionReadModelContract = "native-session-read-model-v1"
@@ -198,7 +200,7 @@ func sessionGroupSQLWithTokenStrategy(org, table string, p sessionReadModelParam
 		} else {
 			// Only the compatibility path parses JSON, once per Trace. JSON
 			// types and DECIMAL casts preserve unknown-versus-zero semantics.
-			tokenUsageJoin = ",JSON_TABLE(p.row_json,'$' COLUMNS (billable_calls JSON PATH '$.coverage.billableCalls' NULL ON EMPTY ERROR ON ERROR,total_tokens JSON PATH '$.usage.total' NULL ON EMPTY ERROR ON ERROR)) token_usage"
+			tokenUsageJoin = ",JSON_TABLE(p.metadata_json_v1,'$' COLUMNS (billable_calls JSON PATH '$.coverage.billableCalls' NULL ON EMPTY ERROR ON ERROR,total_tokens JSON PATH '$.usage.total' NULL ON EMPTY ERROR ON ERROR)) token_usage"
 			tokenValue = "CASE WHEN token_usage.billable_calls=0 THEN 0 WHEN token_usage.billable_calls>0 AND JSON_TYPE(token_usage.total_tokens) IN ('INTEGER','UNSIGNED INTEGER','DOUBLE','DECIMAL') THEN CAST(JSON_UNQUOTE(token_usage.total_tokens) AS DECIMAL(65,0)) ELSE NULL END"
 			billableValue = "CASE WHEN token_usage.billable_calls>0 THEN 1 ELSE 0 END"
 		}
@@ -324,9 +326,9 @@ func sessionPageBatchRows(ctx context.Context, tx *sql.Tx, table, scope string, 
 	}
 	where := scope + " AND (" + strings.Join(clauses, " OR ") + ")"
 	args := append(append([]any{}, scopeArgs...), idArgs...)
-	prunedRow := sessionSummarySQL()
+	prunedRow := readModelStoredRowJSONSQL(true)
 	if includeContent {
-		prunedRow = readModelRowJSONSQL(false)
+		prunedRow = readModelStoredRowJSONSQL(false)
 	}
 	preflight, err := scanReadModelRows(ctx, tx, "SELECT p.session_id,COUNT(*) AS trace_count,COALESCE(SUM(OCTET_LENGTH("+prunedRow+")+OCTET_LENGTH(p.preview_json)+100),0) AS selected_bytes FROM "+table+" p WHERE "+where+" GROUP BY BINARY p.session_id,p.session_id", args...)
 	if err != nil {
@@ -398,6 +400,11 @@ func (s *oceanBaseStore) sessionReadModelPage(ctx context.Context, org string, p
 		return nil, err
 	} else if reason != "" {
 		return readModelUnsupported(reason), nil
+	}
+	if ready, err := ingest.TraceProjectionSummaryColumnsReady(ctx, tx, s.cfg.TablePrefix); err != nil {
+		return nil, err
+	} else if !ready {
+		return readModelUnsupported("projection_summary_columns_unavailable"), nil
 	}
 	if reason, err := s.sessionReadModelCoverage(ctx, tx, org, p); err != nil {
 		return nil, err

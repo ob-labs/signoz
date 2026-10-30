@@ -274,7 +274,11 @@ type projectionSchemaConnection interface {
 
 // Only the dedicated DDL connection receives the longer SQL deadline. Restore
 // its prior session setting before returning it to the ordinary query pool.
-func withProjectionMigrationConnection(ctx context.Context, db *sql.DB, migrate func(*sql.Conn) error) (err error) {
+func withProjectionMigrationConnection(ctx context.Context, db *sql.DB, migrate func(*sql.Conn) error) error {
+	return withProjectionMigrationTimeout(ctx, db, 2*time.Minute, migrate)
+}
+
+func withProjectionMigrationTimeout(ctx context.Context, db *sql.DB, timeout time.Duration, migrate func(*sql.Conn) error) (err error) {
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return err
@@ -284,7 +288,7 @@ func withProjectionMigrationConnection(ctx context.Context, db *sql.DB, migrate 
 	if err := conn.QueryRowContext(ctx, "SELECT @@session.ob_query_timeout").Scan(&previous); err != nil {
 		return err
 	}
-	if _, err := conn.ExecContext(ctx, "SET SESSION ob_query_timeout=120000000"); err != nil {
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf("SET SESSION ob_query_timeout=%d", timeout.Microseconds())); err != nil {
 		return err
 	}
 	defer func() {

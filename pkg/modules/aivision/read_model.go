@@ -200,6 +200,13 @@ func (h *handler) ReadModel(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, readModelUnsupported(reason))
 		return
 	}
+	switch action {
+	case "source-page", "page", "window", "metrics-window", "metrics-aggregate", "operation-page", "batch-snapshot", "sessions/page", "snapshot":
+		if !acquireTraceQuery(w) {
+			return
+		}
+		defer releaseTraceQuery()
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), readModelRequestTimeout(action, h.cfg.QueryTimeout))
 	defer cancel()
 	var result any
@@ -288,6 +295,9 @@ func (h *handler) ReadModel(w http.ResponseWriter, r *http.Request) {
 				}
 				if optionalErr := ingest.InitializeTraceContentColumn(ctx, h.backend.db, h.backend.cfg.TablePrefix); optionalErr != nil && h.logger != nil {
 					h.logger.Warn("optional content coverage initialization after maintenance resume failed; JSON coverage retained", "error", optionalErr)
+				}
+				if optionalErr := ingest.InitializeTraceProjectionSummaries(ctx, h.backend.db, h.backend.cfg.TablePrefix); optionalErr != nil && h.logger != nil {
+					h.logger.Warn("projection summary initialization after maintenance resume failed; list queries remain unavailable", "error", optionalErr)
 				}
 			}
 		}
@@ -571,6 +581,15 @@ func (s *oceanBaseStore) dirtyTraceSources(ctx context.Context, org, space, proj
 			return nil, err
 		}
 	}
+	if requiredSupplement != "" && !statisticsReady {
+		ready, err := ingest.TraceProjectionMetricsVersionReady(ctx, tx, s.cfg.TablePrefix)
+		if err != nil {
+			return nil, err
+		}
+		if !ready {
+			return readModelUnsupported("projection_metrics_version_unavailable"), nil
+		}
+	}
 	join := ""
 	if statisticsReady {
 		join = " LEFT JOIN " + s.readModelTable("trace_statistics") + " t ON t.org_id=p.org_id AND t.space_id=p.space_id AND t.trace_id=p.trace_id"
@@ -583,7 +602,7 @@ func (s *oceanBaseStore) dirtyTraceSources(ctx context.Context, org, space, proj
 		// Supplements can be populated incrementally without invalidating ready
 		// Trace/Session summaries or changing their source revisions. COALESCE
 		// includes absent JSON paths; JSON null also differs from the version.
-		query += " OR BINARY COALESCE(JSON_UNQUOTE(JSON_EXTRACT(p.row_json,'$._metrics.version')),'')<>BINARY ?"
+		query += " OR BINARY COALESCE(p.metrics_version_v1,'')<>BINARY ?"
 		args = append(args, requiredSupplement)
 	}
 	query += ") AND s.trace_id>? ORDER BY BINARY s.trace_id LIMIT ?"
@@ -1061,6 +1080,11 @@ func (s *oceanBaseStore) readModelPage(ctx context.Context, org string, p native
 	} else if reason != "" {
 		return readModelUnsupported(reason), nil
 	}
+	if ready, err := ingest.TraceProjectionSummaryColumnsReady(ctx, tx, s.cfg.TablePrefix); err != nil {
+		return nil, err
+	} else if !ready {
+		return readModelUnsupported("projection_summary_columns_unavailable"), nil
+	}
 	for _, filter := range p.Filters {
 		if filter.Field == "total_tokens" || filter.Field == "attributes.gen_ai.usage.total_tokens" {
 			ready, reason, err := s.sessionTokenGeneratedCapability(ctx, tx)
@@ -1148,9 +1172,17 @@ func (s *oceanBaseStore) readModelPage(ctx context.Context, org string, p native
 		}
 	}
 	listArgs := append(append([]any{}, args...), p.Limit, (p.Page-1)*p.Limit)
-	// Optional per-operation facts belong to bounded operation/metrics readers,
-	// not to each list row. Remove them in SQL before any row reaches Go.
-	rows, err := scanReadModelRows(ctx, tx, "SELECT "+readModelRowJSONSQL(p.MetadataOnly)+" AS row_json,p.preview_json,p.source_revision FROM "+projections+" p WHERE "+where+" ORDER BY "+order+" LIMIT ? OFFSET ?", listArgs...)
+	// Size only the selected page's stored summaries, before fetching/decoding.
+	// LIMIT stays inside the aggregate so off-page rows cannot exhaust the page.
+	var selectedBytes int64
+	sizeQuery := "SELECT COALESCE(SUM(selected_bytes),0) FROM (SELECT OCTET_LENGTH(" + readModelStoredRowJSONSQL(p.MetadataOnly) + ")+OCTET_LENGTH(p.preview_json)+100 AS selected_bytes FROM " + projections + " p WHERE " + where + " ORDER BY " + order + " LIMIT ? OFFSET ?) selected_page"
+	if err := tx.QueryRowContext(ctx, sizeQuery, listArgs...).Scan(&selectedBytes); err != nil {
+		return nil, err
+	}
+	if selectedBytes < 0 || selectedBytes > projectionBatchPayloadLimit {
+		return readModelUnsupported("projection_page_payload_limit"), nil
+	}
+	rows, err := scanReadModelRows(ctx, tx, "SELECT "+readModelStoredRowJSONSQL(p.MetadataOnly)+" AS row_json,p.preview_json,p.source_revision FROM "+projections+" p WHERE "+where+" ORDER BY "+order+" LIMIT ? OFFSET ?", listArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -1197,7 +1229,15 @@ func (s *oceanBaseStore) readModelPage(ctx context.Context, org string, p native
 	}
 	meta := map[string]any{"contract": traceReadModelContract, "queryMode": "read_model", "queryContract": traceReadModelContract, "environmentSemantics": "root-span-resource-v1", "userIdentitySemantics": "trace-sdk-user-id-v1", "complete": true, "projection_context": p.ProjectionContext, "from": p.From, "to": p.To, "space_id": p.SpaceID, "agent_product": p.AgentProduct, "user": p.User, "agent_uuid": p.AgentUUID, "page": p.Page, "limit": p.Limit, "totalItems": total, "windowTotalItems": windowTotal, "totalPages": (total + p.Limit - 1) / p.Limit}
 	meta["contentCoverageStrategy"] = contentStrategy
-	return map[string]any{"supported": true, "data": data, "facets": facets, "meta": meta}, nil
+	result := map[string]any{"supported": true, "data": data, "facets": facets, "meta": meta}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return nil, err
+	}
+	if len(encoded) > projectionBatchPayloadLimit {
+		return readModelUnsupported("projection_page_payload_limit"), nil
+	}
+	return result, nil
 }
 
 // The shared durable state is read inside the request snapshot. A maintenance

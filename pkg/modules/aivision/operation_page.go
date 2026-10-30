@@ -124,6 +124,15 @@ func (s *oceanBaseStore) traceOperationPage(ctx context.Context, org string, p n
 	}
 	data := []map[string]any{}
 	if selected > 0 {
+		if p.OperationFacts {
+			ready, err := ingest.TraceProjectionOperationPreviewsReady(ctx, tx, s.cfg.TablePrefix)
+			if err != nil {
+				return nil, err
+			}
+			if !ready {
+				return readModelUnsupported("operation_preview_columns_unavailable"), nil
+			}
+		}
 		columns := "t.trace_id,c.observation_id,c.kind AS type,c.start_ns,s.source_revision,t.span_count"
 		if p.OperationFacts {
 			columns += operationFactsColumnsSQL()
@@ -163,16 +172,30 @@ func (s *oceanBaseStore) traceOperationPage(ctx context.Context, org string, p n
 			}
 			previousTime, previousTrace, previousID = at, trace, id
 			item := map[string]any{"trace_id": trace, "observation_id": id, "type": kind, "start_ns": strconv.FormatInt(at, 10), "source_revision": revision, "span_count": count}
-			// The look-ahead key determines has_more only. Its preview is not
-			// needed for the selected page and cannot invalidate that page.
-			if p.OperationFacts && index < limit {
-				facts, preview, e := decodeOperationFacts(row)
-				if e != nil {
+
+			data = append(data, item)
+		}
+		if p.OperationFacts {
+			selectedRows := rows
+			if len(selectedRows) > limit {
+				selectedRows = selectedRows[:limit]
+			}
+			previews, reason, err := s.operationPagePreviews(ctx, tx, org, p, selectedRows)
+			if err != nil {
+				return nil, err
+			}
+			if reason != "" {
+				return readModelUnsupported(reason), nil
+			}
+			for index, row := range selectedRows {
+				trace, id := row["trace_id"].(string), row["observation_id"].(string)
+				row["operation_preview"] = previews[trace][id]
+				facts, preview, err := decodeOperationFacts(row)
+				if err != nil {
 					return readModelUnsupported("selected_operation_preview_unavailable"), nil
 				}
-				item["facts"], item["preview"] = facts, preview
+				data[index]["facts"], data[index]["preview"] = facts, preview
 			}
-			data = append(data, item)
 		}
 	}
 	more := len(data) > limit

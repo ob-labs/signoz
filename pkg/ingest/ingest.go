@@ -118,9 +118,15 @@ func AddToRouter(router *mux.Router, cfg Config, logger *slog.Logger) error {
 		_ = db.Close()
 		return err
 	}
+	if err := InitializeTracePageDimensions(context.Background(), db, cfg.TablePrefix); err != nil {
+		logger.Warn("trace page metadata unavailable; ingestion retained", "error", err)
+	}
 	initCtx, initCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	if err := initializeProjectionMaintenance(initCtx, db, cfg); err != nil {
 		logger.Warn("projection maintenance unavailable; raw ingestion retained with shared eligibility fence", "error", err)
+	}
+	if err := initializeProjectionSummaries(initCtx, db, cfg); err != nil {
+		logger.Warn("projection summaries unavailable; ingestion retained", "error", err)
 	}
 	initCancel()
 	ep := &endpoint{
@@ -148,6 +154,15 @@ func initializeProjectionMaintenance(ctx context.Context, db *sql.DB, cfg Config
 		return nil
 	}
 	return InitializeTraceReadModelMaintenance(ctx, db, cfg.TablePrefix, !cfg.ProjectionMaintenanceDisabled)
+}
+
+func initializeProjectionSummaries(ctx context.Context, db *sql.DB, cfg Config) error {
+	// The managed provider already owns optional migration and retry. Repeating
+	// it here both blocks route registration and competes for the same lease.
+	if cfg.ProjectionMaintenanceManaged {
+		return nil
+	}
+	return InitializeTraceProjectionSummaries(ctx, db, cfg.TablePrefix)
 }
 
 func (ep *endpoint) authorized(r *http.Request) bool {
@@ -209,9 +224,7 @@ func (ep *endpoint) handleTraces(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := ep.insertRows(r.Context(), ep.tracesTable, spanInsertColumns, spanUpsert, rows); err != nil {
 		ep.logger.Error("insert otlp traces", slog.String("err", err.Error()))
-		// 5xx on purpose: the gateway otlphttp exporter retries on it, so a
-		// transient store failure costs latency, not telemetry.
-		http.Error(w, "insert traces: "+err.Error(), http.StatusInternalServerError)
+		writeStorageError(w, "insert traces", err)
 		return
 	}
 	writeOTLPResponse(w, isJSON)
@@ -247,7 +260,7 @@ func (ep *endpoint) handleLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := ep.insertRows(r.Context(), ep.logsTable, logInsertColumns, logUpsert, rows); err != nil {
 		ep.logger.Error("insert otlp logs", slog.String("err", err.Error()))
-		http.Error(w, "insert logs: "+err.Error(), http.StatusInternalServerError)
+		writeStorageError(w, "insert logs", err)
 		return
 	}
 	writeOTLPResponse(w, isJSON)

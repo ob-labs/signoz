@@ -11,7 +11,7 @@ import (
 const traceWindowEnvelopeReserve = 16 * 1024
 const traceWindowEntryReserve = 512
 
-var errTraceWindowPayloadBudget = errors.New("complete recovery window exceeds 256 MiB response; narrow the time range")
+var errTraceWindowPayloadBudget = errors.New("complete recovery window exceeds response byte budget; narrow the time range")
 
 // Use the renderer's serializer for exact escaping and number formatting.
 // Marshal only individual entries, never the complete response a second time.

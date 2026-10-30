@@ -33,13 +33,13 @@ func TestWindowWireBudgetCoversActualHTTPEncoding(t *testing.T) {
 
 func TestWindowWireBudgetRejectsEscapedGroupsBeforeAccumulating(t *testing.T) {
 	budget := newTraceWindowWireBudget(traceWindowEnvelopeReserve + 1024)
-	require.ErrorContains(t, budget.addRawGroup(strings.Repeat("\x00", 200)), "256 MiB response")
+	require.ErrorContains(t, budget.addRawGroup(strings.Repeat("\x00", 200)), "response byte budget")
 	require.Equal(t, traceWindowEnvelopeReserve, budget.used)
 }
 
 func TestWindowWireBudgetRejectsOversizedMetadataAndRows(t *testing.T) {
 	budget := newTraceWindowWireBudget(traceWindowEnvelopeReserve + 1024)
 	require.ErrorContains(t, budget.validateEnvelope(map[string]any{"agent_uuid": strings.Repeat("\x00", traceWindowEnvelopeReserve)}), "metadata")
-	require.ErrorContains(t, budget.addRow(map[string]any{"input": strings.Repeat("\x00", 200)}), "256 MiB response")
+	require.ErrorContains(t, budget.addRow(map[string]any{"input": strings.Repeat("\x00", 200)}), "response byte budget")
 	require.Equal(t, traceWindowEnvelopeReserve, budget.used)
 }

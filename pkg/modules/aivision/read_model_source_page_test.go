@@ -38,6 +38,10 @@ func expectSourcePageFence(mock sqlmock.Sqlmock, revision, generation int64, val
 	mock.ExpectQuery("SELECT source_revision,min_timestamp,max_timestamp,user_id,agent_product,scope_valid").WithArgs("org", "org", "space", "space", "abc", "abc").WillReturnRows(sqlmock.NewRows([]string{"revision", "min", "max", "user", "product", "valid"}).AddRow(revision, 100, 200, "owner", "product", valid))
 }
 
+func expectSourceRawSize(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery("SELECT COUNT.*SUM.*OCTET_LENGTH.*MAX.*OCTET_LENGTH").WillReturnRows(sqlmock.NewRows([]string{"count", "bytes", "max"}).AddRow(1, 18<<20, 18<<20))
+}
+
 // A single Span above the v1 limit must produce a bounded fragment instead of a decline.
 func TestSourcePageFragmentsSpanLargerThanLegacyLimit(t *testing.T) {
 	db, mock, err := sqlmock.New()
@@ -45,6 +49,7 @@ func TestSourcePageFragmentsSpanLargerThanLegacyLimit(t *testing.T) {
 	defer db.Close()
 	s := &oceanBaseStore{db: db, cfg: config{TablePrefix: "test"}}
 	expectSourcePageFence(mock, 4, 7, true)
+	expectSourceRawSize(mock)
 	mock.ExpectQuery("SELECT COUNT\\(\\*\\),COALESCE\\(SUM\\(OCTET_LENGTH").WillReturnRows(sqlmock.NewRows([]string{"count", "bytes"}).AddRow(1, 18<<20))
 	mock.ExpectQuery("SELECT span_id,OCTET_LENGTH").WillReturnRows(sqlmock.NewRows([]string{"span_id", "total_bytes"}).AddRow("001", 18<<20))
 	payload := []byte(strings.Repeat("x", 1280<<10))
@@ -99,6 +104,7 @@ func TestSourcePageRejectsOversizeTraceBeforeFetchingFragments(t *testing.T) {
 	defer db.Close()
 	s := &oceanBaseStore{db: db, cfg: config{TablePrefix: "test"}}
 	expectSourcePageFence(mock, 4, 7, true)
+	expectSourceRawSize(mock)
 	mock.ExpectQuery("SELECT COUNT\\(\\*\\),COALESCE\\(SUM\\(OCTET_LENGTH").WillReturnRows(sqlmock.NewRows([]string{"count", "bytes"}).AddRow(1, (128<<20)+1))
 	mock.ExpectRollback()
 	result, err := s.traceSourcePage(context.Background(), "org", "space", "abc", "")
@@ -125,6 +131,7 @@ func TestSourcePageReconstructsEveryByteOfLargeUnicodeSpan(t *testing.T) {
 			size = len(wire) - offset
 		}
 		expectSourcePageFence(mock, 4, 7, true)
+		expectSourceRawSize(mock)
 		span := "001"
 		if offset == 0 {
 			span = ""
@@ -151,5 +158,36 @@ func TestSourcePageReconstructsEveryByteOfLargeUnicodeSpan(t *testing.T) {
 	}
 	require.Empty(t, cursor)
 	require.Equal(t, wire, reconstructed)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSourcePageSharesQueryAdmission(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	cfg := config{Enabled: true, QueryTimeout: time.Second, TablePrefix: "test"}
+	h := &handler{backend: &oceanBaseStore{db: db, cfg: cfg}, cfg: cfg, logger: slog.Default()}
+	require.True(t, acquireTraceQuery(httptest.NewRecorder()))
+	require.True(t, acquireTraceQuery(httptest.NewRecorder()))
+	defer func() { releaseTraceQuery(); releaseTraceQuery() }()
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/ai-vision/traces/read-model/source-page?space_id=space&trace_id=abc", nil)
+	r = r.WithContext(authtypes.NewContextWithClaims(r.Context(), authtypes.Claims{OrgID: supplementTestOrg}))
+	w := httptest.NewRecorder()
+	h.ReadModel(w, r)
+	require.Equal(t, http.StatusTooManyRequests, w.Code)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSourcePageRawSizeGuardPrecedesJSONConstruction(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	s := &oceanBaseStore{db: db, cfg: config{TablePrefix: "test"}}
+	expectSourcePageFence(mock, 4, 7, true)
+	mock.ExpectQuery("SELECT COUNT.*SUM.*OCTET_LENGTH.*MAX.*OCTET_LENGTH").WillReturnRows(sqlmock.NewRows([]string{"count", "bytes", "max"}).AddRow(1, 129<<20, 129<<20))
+	mock.ExpectRollback()
+	result, err := s.traceSourcePage(context.Background(), "org", "space", "abc", "")
+	require.NoError(t, err)
+	require.Equal(t, readModelUnsupported("source_trace_payload_limit"), result)
 	require.NoError(t, mock.ExpectationsWereMet())
 }

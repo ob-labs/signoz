@@ -139,7 +139,17 @@ func (s *oceanBaseStore) traceSourcePage(ctx context.Context, org, space, trace,
 		if revision != cursor.Revision {
 			return readModelUnsupported("source_revision_changed"), nil
 		}
-	} else {
+	}
+	// Bound raw source widths before JSON_OBJECT is evaluated, including cursor
+	// continuations. Small fragments alone do not bound database allocations.
+	var rawCount, rawBytes, maxRawBytes int64
+	if err = tx.QueryRowContext(ctx, "SELECT COUNT(*),COALESCE(SUM("+nativeSpanSourceBytesSQL()+"),0),COALESCE(MAX("+nativeSpanSourceBytesSQL()+"),0) FROM "+s.tracesTable()+" WHERE "+scope, args...).Scan(&rawCount, &rawBytes, &maxRawBytes); err != nil {
+		return nil, err
+	}
+	if rawCount < 1 || rawCount > 100000 || rawBytes > sourcePageTraceByteLimit || maxRawBytes > 32*1024*1024 {
+		return readModelUnsupported("source_trace_payload_limit"), nil
+	}
+	if rawCursor == "" {
 		cursor.Generation, cursor.Revision = generation, revision
 		// A single exact Trace aggregate determines the reconstruction budget.
 		// It returns only numbers, never LONGTEXT values, to the Go process.

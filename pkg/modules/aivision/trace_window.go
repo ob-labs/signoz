@@ -19,7 +19,10 @@ import (
 const traceWindowContract = "native-trace-window-v1"
 const traceWindowTraceLimit = 50000
 const traceWindowSpanLimit = 500000
-const traceWindowPayloadLimit = 256 * 1024 * 1024
+const traceWindowPayloadLimit = 24 * 1024 * 1024
+
+// Source admission failures must not trigger the representation-only raw retry.
+var errTraceWindowResourceBudget = errors.New("complete recovery window exceeds resource bound")
 
 func (h *handler) traceWindowParams(r *http.Request) (nativeListParams, bool, error) {
 	allowed := map[string]bool{}
@@ -139,7 +142,7 @@ func (s *oceanBaseStore) traceWindowRepresentation(ctx context.Context, org stri
 		return nil, fmt.Errorf("invalid recovery window counts")
 	}
 	if traceCount > traceWindowTraceLimit || spanCount > traceWindowSpanLimit || payloadBytes > traceWindowSourceByteLimit || maximumSpanBytes > traceSpanSourceByteLimit {
-		return nil, fmt.Errorf("complete recovery window exceeds resource bound (50000 Traces,500000 spans,512 MiB source,16 MiB per span); narrow the time range")
+		return nil, fmt.Errorf("%w (50000 Traces,500000 spans,512 MiB source,16 MiB per span); narrow the time range", errTraceWindowResourceBudget)
 	}
 	canonical := []map[string]any{}
 	cleanCount := int64(0)
@@ -164,6 +167,33 @@ func (s *oceanBaseStore) traceWindowRepresentation(ctx context.Context, org stri
 		recoveryReason = "canonical_summary_budget"
 	}
 	candidate := "SELECT trace_id,COUNT(*) AS span_count FROM " + s.tracesTable() + " WHERE " + scope + " GROUP BY BINARY trace_id,trace_id"
+	storedMetrics := false
+	if useProjection && metricsOnly {
+		storedMetrics, err = ingest.TraceProjectionMetricsWindowColumnsReady(ctx, tx, s.cfg.TablePrefix)
+		if err != nil {
+			return nil, err
+		}
+		// Older/conflicting schemas retain the existing bounded stream. A
+		// missing optimization must not turn compact metrics into a raw-only
+		// response that exceeds its wire budget.
+	}
+	if useProjection && metricsOnly {
+		// Compact metrics may be small even when full canonical IO is large.
+		// Bound one historical/direct-writer row before decoding, not the sum
+		// of IO across the window. Ordinary publications are limited to 16 MiB.
+		var maximumProjectionBytes int64
+		query := "SELECT COALESCE(MAX(OCTET_LENGTH(p.row_json)),0) FROM (" + candidate + ") r JOIN " + cleanRelation
+		values := append(append([]any{}, args...), cleanArgs...)
+		if err := tx.QueryRowContext(ctx, query, values...).Scan(&maximumProjectionBytes); err != nil {
+			return nil, err
+		}
+		if maximumProjectionBytes < 0 {
+			return nil, fmt.Errorf("invalid canonical recovery row byte count")
+		}
+		if maximumProjectionBytes > sourcePageTraceByteLimit {
+			resetToRaw()
+		}
+	}
 	if useProjection && !metricsOnly {
 		// Canonical rows duplicate IO and may exceed the compact raw form. This
 		// conservative estimate avoids loading a known-large representation.
@@ -187,10 +217,12 @@ func (s *oceanBaseStore) traceWindowRepresentation(ctx context.Context, org stri
 		// from inventing rows when source reconciliation is still catching up.
 		columns := "r.trace_id,r.span_count,p.agent_uuid,p.row_json,p.preview_json,p.source_revision"
 		if metricsOnly {
-			// Stream one canonical row at a time and discard content before its
-			// exact wire budget is measured. Full IO bytes do not predict the
-			// metrics representation and must not force an all-raw fallback.
 			columns = "r.trace_id,r.span_count,p.agent_uuid,p.row_json,p.source_revision"
+		}
+		if metricsOnly && storedMetrics {
+			// Never transfer or parse full canonical IO on a metrics read. Stored
+			// helpers are backfilled and maintained even by older publishers.
+			columns = "r.trace_id,r.span_count,p.agent_uuid,p." + ingest.TraceProjectionMetadataColumn + " AS row_json,p." + ingest.TraceProjectionRowKeysColumn + " AS row_keys,p." + ingest.TraceProjectionMetricsColumn + " AS metrics,p." + ingest.TraceProjectionOperationPreviewsColumn + " AS operation_previews,p.source_revision"
 		}
 		query := "SELECT " + columns + " FROM (" + candidate + ") r JOIN " + cleanRelation
 		values := append(append([]any{}, args...), cleanArgs...)
@@ -215,7 +247,14 @@ func (s *oceanBaseStore) traceWindowRepresentation(ctx context.Context, org stri
 				return fmt.Errorf("invalid canonical recovery row")
 			}
 			if metricsOnly {
-				row = traceMetricsWindowRow(row)
+				if storedMetrics {
+					row, e = traceMetricsWindowStoredRow(row, record)
+					if e != nil {
+						return e
+					}
+				} else {
+					row = traceMetricsWindowRow(row)
+				}
 			} else {
 				preview, e := tracePageJSON(record["preview_json"])
 				if e != nil {
@@ -337,4 +376,71 @@ func decodeWindowSpan(row map[string]any) error {
 	row["resource"] = row["resource_attributes"]
 	normalizeNativeSpan(row)
 	return nil
+}
+
+// Stored metadata uses JSON_OBJECT, which adds nulls for absent keys. Recover
+// exactly the old whitelist projection using persisted original key presence.
+// Keep complete observations/previews, including malformed types, so canonical
+// validation sees the same facts as it did when reading row_json directly.
+func traceMetricsWindowStoredRow(metadata, record map[string]any) (map[string]any, error) {
+	decode := func(value any) (any, error) {
+		if value == nil {
+			return nil, nil
+		}
+		text, ok := value.(string)
+		if !ok {
+			return nil, fmt.Errorf("invalid stored metrics JSON")
+		}
+		decoder := json.NewDecoder(strings.NewReader(text))
+		decoder.UseNumber()
+		var result any
+		if err := decoder.Decode(&result); err != nil {
+			return nil, err
+		}
+		var trailing any
+		if decoder.Decode(&trailing) != io.EOF {
+			return nil, fmt.Errorf("invalid trailing stored metrics JSON")
+		}
+		return result, nil
+	}
+	value, err := decode(record["row_keys"])
+	if err != nil {
+		return nil, err
+	}
+	keys, ok := value.([]any)
+	if !ok {
+		return nil, fmt.Errorf("invalid stored metrics row keys")
+	}
+	present := make(map[string]bool, len(keys))
+	for _, value := range keys {
+		key, ok := value.(string)
+		if !ok || present[key] {
+			return nil, fmt.Errorf("invalid stored metrics row key")
+		}
+		present[key] = true
+	}
+	row := make(map[string]any, len(traceMetricsWindowFields))
+	for _, field := range traceMetricsWindowFields {
+		if !present[field] {
+			continue
+		}
+		switch field {
+		case "_metrics", "_operation_previews":
+			column := "metrics"
+			if field == "_operation_previews" {
+				column = "operation_previews"
+			}
+			row[field], err = decode(record[column])
+			if err != nil {
+				return nil, err
+			}
+		default:
+			value, ok := metadata[field]
+			if !ok {
+				return nil, fmt.Errorf("incomplete stored metrics metadata")
+			}
+			row[field] = value
+		}
+	}
+	return row, nil
 }

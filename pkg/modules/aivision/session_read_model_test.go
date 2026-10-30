@@ -68,6 +68,7 @@ func TestSessionReadModelRequiresHistoricalCoverage(t *testing.T) {
 	s := &oceanBaseStore{db: db, cfg: config{TablePrefix: "test"}}
 	mock.ExpectBegin()
 	expectProjectionMaintenance(mock, true, false)
+	expectProjectionSummaryCapability(mock)
 	mock.ExpectQuery("SELECT complete FROM").WithArgs("org", "space").WillReturnRows(sqlmock.NewRows([]string{"complete"}))
 	mock.ExpectRollback()
 	result, err := s.sessionReadModelPage(context.Background(), "org", sessionReadModelTestParams())
@@ -83,6 +84,7 @@ func TestSessionReadModelRejectsOversizedGroupWithoutTruncation(t *testing.T) {
 	s := &oceanBaseStore{db: db, cfg: config{TablePrefix: "test"}}
 	mock.ExpectBegin()
 	expectProjectionMaintenance(mock, true, false)
+	expectProjectionSummaryCapability(mock)
 	mock.ExpectQuery("SELECT complete FROM").WillReturnRows(sqlmock.NewRows([]string{"complete"}).AddRow(true))
 	mock.ExpectQuery("SELECT COALESCE").WillReturnRows(sqlmock.NewRows([]string{"stale", "boundary", "incomplete_content"}).AddRow(0, 0, 0))
 	mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
@@ -135,6 +137,7 @@ func TestSessionReadModelRejectsPayloadBeforeMaterializingRows(t *testing.T) {
 	s := &oceanBaseStore{db: db, cfg: config{TablePrefix: "test"}}
 	mock.ExpectBegin()
 	expectProjectionMaintenance(mock, true, false)
+	expectProjectionSummaryCapability(mock)
 	mock.ExpectQuery("SELECT complete FROM").WillReturnRows(sqlmock.NewRows([]string{"complete"}).AddRow(true))
 	mock.ExpectQuery("SELECT COALESCE").WillReturnRows(sqlmock.NewRows([]string{"stale", "boundary", "incomplete_content"}).AddRow(0, 0, 0))
 	mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
@@ -171,7 +174,7 @@ func TestSessionTokenQueryStrategyUsesActualPagePath(t *testing.T) {
 			t.Setenv("SIGNOZ_AIVISION_TRACE_READ_MODEL_AUTHORITATIVE_INGEST", "true")
 			matcher := sqlmock.QueryMatcherFunc(func(expected, actual string) error {
 				if expected == "group" || expected == "window" {
-					optimized := strings.Contains(actual, "JSON_TABLE(p.row_json,")
+					optimized := strings.Contains(actual, "JSON_TABLE(p.metadata_json_v1,")
 					want := tc.optimized && expected == "group"
 					if optimized != want {
 						return fmt.Errorf("%s query JSON_TABLE active=%t, want %t", expected, optimized, want)
@@ -195,6 +198,7 @@ func TestSessionTokenQueryStrategyUsesActualPagePath(t *testing.T) {
 			p.MinTotalTokens = tc.threshold
 			mock.ExpectBegin()
 			expectProjectionMaintenance(mock, true, false)
+			expectProjectionSummaryCapability(mock)
 			mock.ExpectQuery("SELECT complete FROM").WithArgs("org", "space").WillReturnRows(sqlmock.NewRows([]string{"complete"}).AddRow(true))
 			mock.ExpectQuery("SELECT COALESCE").WillReturnRows(sqlmock.NewRows([]string{"stale", "boundary", "incomplete_content"}).AddRow(0, 0, 0))
 			if tc.threshold != nil {
