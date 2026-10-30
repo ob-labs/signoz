@@ -16,7 +16,7 @@
   "engines": {
     "seekdb": {
       "version": "seekdb-v1.4.0.0",
-      "image": "oceanbase/seekdb@sha256:4db4961869d554313520d6081fca29265ba6da6db7313311bd8acbed771a956b5ad",
+      "image": "oceanbase/seekdb@sha256:4db4961869d554313520d6081fca29265ba6da6db7313311bd8acbed771a956b",
       "cpu_quota": 2,
       "container_memory_gib": 4,
       "memory_budget": "2G",
@@ -518,7 +518,8 @@
   "source_identity": {
     "product_base": "366c7b7fe0d95e528f6b1ecd17019c2f9db86f74",
     "signoz_base": "5b3dde03261a512893dbcb1e889aac429b56b5ad",
-    "implementation_files_unchanged_since_retest": true,
+    "implementation_files_unchanged_since_retest": false,
+    "snapshot_note": "Original PR retest snapshot. The follow-up report records subsequent source changes and tests; historical source hashes below are preserved.",
     "tested_files_sha256": {
       "pkg/ingest/ingest.go": "e6f3f88e47459eb9d7fe9770ef4f45467d4fdc2c6137a6bca09af91e8a64a7e9",
       "pkg/modules/aivision/handler.go": "f492a3969d71ccb0b85c849c79899e1eb8ae20e62f6f7adc87cc61aa32d88571",

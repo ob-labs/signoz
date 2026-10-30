@@ -487,13 +487,25 @@ provider = SignozTraceProvider()
 request_params = {**params, "from": value["payload"]["meta"]["from"], "to": value["payload"]["meta"]["to"], "agent_uuid": "agent", "agent_product": "Codex"}
 query = TraceListQuery(SimpleNamespace(uuid=value["scope"], type=2), None, request_params)
 with patch.object(provider, "_context", return_value=(client, {"agent_product_filter": "Codex"})), patch.object(provider, "_window", side_effect=AssertionError("storage page must not invoke compatibility scan")):
-    page = provider.query_traces(query)
+    # Exercise the native-page contract directly. The public router may first
+    # request read-model/snapshot contracts that this fixture does not provide.
+    page = provider._query_trace_page(query)
+assert page is not None
 assert page["meta"]["queryMode"] == "storage", page["meta"]
 assert page["meta"]["totalItems"] == result["meta"]["totalItems"], page["meta"]
 assert [row["trace_id"] for row in page["data"]] == [row["trace_id"] for row in result["data"]]
-assert page["facets"] == window.facets(params), page["facets"]
+# Legacy any-Span environment/collector-user facets are deliberately not
+# advertised as canonical root-environment/SDK-user facets by the adapter.
+expected_facets = window.facets(params)
+if not page["meta"]["environmentFacetsComplete"]:
+    assert "env" not in page["facets"]
+    expected_facets.pop("env", None)
+if not page["meta"]["userIdentityFacetsComplete"]:
+    assert "username" not in page["facets"]
+    expected_facets.pop("username", None)
+assert page["facets"] == expected_facets, page["facets"]
 assert client.get.call_count == 1, client.get.call_count
-print(json.dumps({"ids": [row["trace_id"] for row in result["data"]], "total": result["meta"]["totalItems"], "facets": window.facets(params)}))
+print(json.dumps({"ids": [row["trace_id"] for row in result["data"]], "total": result["meta"]["totalItems"], "facets": expected_facets}))
 `
 	command := exec.Command(python, "-c", script)
 	command.Dir = backend
@@ -510,5 +522,7 @@ print(json.dumps({"ids": [row["trace_id"] for row in result["data"]], "total": r
 	}
 	require.Equal(t, expected["ids"], ids, "storage selection must match NativeTraceWindow")
 	require.Equal(t, expected["total"], result["meta"].(map[string]any)["totalItems"])
-	require.Equal(t, expected["facets"], result["facets"], "storage facets must match NativeTraceWindow")
+	for dimension, values := range expected["facets"].(map[string]any) {
+		require.Equal(t, values, result["facets"].(map[string]any)[dimension], "declared canonical facets must match NativeTraceWindow")
+	}
 }

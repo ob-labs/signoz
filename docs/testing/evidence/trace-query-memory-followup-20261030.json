@@ -1,0 +1,805 @@
+{
+  "date": "2026-10-30",
+  "scope": "manual follow-up to the initial memory PRs",
+  "baseline": {
+    "product": "dbcf7290008d1bbe25423d3d2f8c210756ab241f",
+    "signoz": "fc3ee92c804bd73dc72194fc9a6f9fd2eacbe9e9"
+  },
+  "retained_sql_variant": "materialize",
+  "sql_export_sha256": "425b6f5ea9b6b2cc29ccbaf053c52fe57f87fdacc93cc1c441cfda4a9d8ac5aa",
+  "sql_args_sha256": "080a0621ac96e04758a1b0f0e18c3dbe8901d387732cf2341c32ecf85c30a136",
+  "canonical_5000_span_response_sha256": "8f3de6d5a1f9c9204ec22d1d7af7a1d3b94da2ab05a0cc18c5828c35a702dd6d",
+  "source_files_sha256_at_packaging": {
+    "product/ai-vision/aivision-py-be/apps/core/trace_query/signoz/provider.py": "9195e3abb4cf08414467b87cec96f57f47add0c9f609d95524422435d81e32ca",
+    "product/ai-vision/aivision-py-be/apps/core/tests/test_trace_query_memory.py": "4112f17577653bb5a553e0bfec16d56ecab91fba66560e794a0ef9c845a38260",
+    "signoz/pkg/modules/aivision/trace_page.go": "f1f78c303397ccc4053e093d59cc4e1f7634c8294a194336c8f0f5da2b897d50",
+    "signoz/pkg/modules/aivision/trace_page_integration_test.go": "7c0157623193c9a43928ab0c88551505f019efcdb04ff53ded8e8f60636b7b76"
+  },
+  "engines": {
+    "seekdb": {
+      "version": "5.7.25-OceanBase seekdb-v1.4.0.0",
+      "actual_image": "sha256:39a950d4caf63489638ff9aa9b7028b5dd2a896e8fc5d77ae6145fa60fd3b59d",
+      "container_memory_bytes": 4294967296,
+      "parameters": {
+        "memory_limit": "0M",
+        "memory_budget": "2G"
+      },
+      "warm_c4": {
+        "baseline": {
+          "median_seconds": 0.4041404585004784,
+          "round_seconds": [
+            [
+              1.056489,
+              1.051492,
+              1.042188,
+              1.062983
+            ],
+            [
+              0.374723,
+              0.385624,
+              0.379613,
+              0.366118
+            ],
+            [
+              0.407879,
+              0.387821,
+              0.394177,
+              0.400402
+            ],
+            [
+              0.36742,
+              0.376011,
+              0.385786,
+              0.381066
+            ],
+            [
+              0.381213,
+              0.391028,
+              0.385823,
+              0.373465
+            ],
+            [
+              0.445976,
+              0.374878,
+              0.440078,
+              0.435207
+            ],
+            [
+              0.466524,
+              0.458517,
+              0.472033,
+              0.477179
+            ],
+            [
+              0.427771,
+              0.440158,
+              0.42156,
+              0.43454
+            ]
+          ],
+          "median_phase_seconds": {
+            "metadata": 0.0036117084964644164,
+            "page_preflight": 0.0653404789918568,
+            "page_query": 0.31769250001525506
+          }
+        },
+        "index": {
+          "median_seconds": 0.3851149585098028,
+          "round_seconds": [
+            [
+              0.716194,
+              0.684963,
+              0.693625,
+              0.708064
+            ],
+            [
+              0.400954,
+              0.396001,
+              0.444785,
+              0.380906
+            ],
+            [
+              0.38054,
+              0.385388,
+              0.367132,
+              0.373829
+            ],
+            [
+              0.38061,
+              0.373058,
+              0.391528,
+              0.386122
+            ],
+            [
+              0.374058,
+              0.381916,
+              0.388175,
+              0.394261
+            ],
+            [
+              0.390615,
+              0.379514,
+              0.385647,
+              0.395419
+            ],
+            [
+              0.378808,
+              0.384459,
+              0.38925,
+              0.372094
+            ],
+            [
+              0.379442,
+              0.373169,
+              0.384842,
+              0.357362
+            ]
+          ],
+          "median_phase_seconds": {
+            "metadata": 0.0034198545035906136,
+            "page_preflight": 0.06484327098587528,
+            "page_query": 0.3124161254672799
+          }
+        },
+        "materialize": {
+          "median_seconds": 0.3740627295046579,
+          "round_seconds": [
+            [
+              0.729925,
+              0.74784,
+              0.735956,
+              0.724239
+            ],
+            [
+              0.39522,
+              0.387717,
+              0.37638,
+              0.382771
+            ],
+            [
+              0.373458,
+              0.378289,
+              0.367724,
+              0.355874
+            ],
+            [
+              0.375969,
+              0.357427,
+              0.351891,
+              0.368118
+            ],
+            [
+              0.371144,
+              0.348047,
+              0.361238,
+              0.366093
+            ],
+            [
+              0.357279,
+              0.365365,
+              0.398107,
+              0.376155
+            ],
+            [
+              0.341631,
+              0.416059,
+              0.410977,
+              0.421207
+            ],
+            [
+              0.361903,
+              0.366934,
+              0.355413,
+              0.374667
+            ]
+          ],
+          "median_phase_seconds": {
+            "metadata": 0.0039596665010321885,
+            "page_preflight": 0.06950327102094889,
+            "page_query": 0.29411229147808626
+          }
+        },
+        "both": {
+          "median_seconds": 0.37266087500029244,
+          "round_seconds": [
+            [
+              0.644492,
+              0.633097,
+              0.620722,
+              0.628128
+            ],
+            [
+              0.394181,
+              0.404896,
+              0.399886,
+              0.382782
+            ],
+            [
+              0.346685,
+              0.367021,
+              0.356003,
+              0.361779
+            ],
+            [
+              0.364901,
+              0.353015,
+              0.360415,
+              0.370025
+            ],
+            [
+              0.349589,
+              0.365931,
+              0.370847,
+              0.35479
+            ],
+            [
+              0.384239,
+              0.373655,
+              0.378799,
+              0.364008
+            ],
+            [
+              0.376923,
+              0.383217,
+              0.371667,
+              0.388854
+            ],
+            [
+              0.380923,
+              0.370578,
+              0.375819,
+              0.365356
+            ]
+          ],
+          "median_phase_seconds": {
+            "metadata": 0.0035689380019903183,
+            "page_preflight": 0.07049404198187403,
+            "page_query": 0.29341277049388736
+          }
+        }
+      },
+      "window_c1": {
+        "0": {
+          "canonical_sha256": "17f98ce0965be9de8f5da82458ee56b11504ad2e7e5e779d78fdd95f19f1732c",
+          "baseline": {
+            "median_seconds": 0.0029512919718399644,
+            "seconds": [
+              0.245335,
+              0.002722,
+              0.002986,
+              0.002709,
+              0.003187,
+              0.002916
+            ]
+          },
+          "materialize": {
+            "median_seconds": 0.002747458522208035,
+            "seconds": [
+              0.128292,
+              0.002707,
+              0.002466,
+              0.002975,
+              0.002787,
+              0.002708
+            ]
+          }
+        },
+        "20": {
+          "canonical_sha256": "bddfe368d408aad510cd4421f6ea304dbbf903d35d5a5574d40ffd225229dcad",
+          "baseline": {
+            "median_seconds": 0.010075624973978847,
+            "seconds": [
+              0.011768,
+              0.010085,
+              0.010183,
+              0.009748,
+              0.009958,
+              0.010066
+            ]
+          },
+          "materialize": {
+            "median_seconds": 0.009043583500897512,
+            "seconds": [
+              0.008873,
+              0.009361,
+              0.008914,
+              0.009499,
+              0.009144,
+              0.008943
+            ]
+          }
+        },
+        "200": {
+          "canonical_sha256": "d8d524d41dcf5de72c5e496dded106136c7df9b2a712ff81b21f91411b8d8529",
+          "baseline": {
+            "median_seconds": 0.03168216650374234,
+            "seconds": [
+              0.032845,
+              0.03238,
+              0.039255,
+              0.030844,
+              0.0307,
+              0.030985
+            ]
+          },
+          "materialize": {
+            "median_seconds": 0.024015937524382025,
+            "seconds": [
+              0.025387,
+              0.022516,
+              0.024975,
+              0.024914,
+              0.023118,
+              0.022504
+            ]
+          }
+        },
+        "5000": {
+          "canonical_sha256": "8f3de6d5a1f9c9204ec22d1d7af7a1d3b94da2ab05a0cc18c5828c35a702dd6d",
+          "baseline": {
+            "median_seconds": 0.3870466870139353,
+            "seconds": [
+              0.474057,
+              0.43201,
+              0.408588,
+              0.365343,
+              0.365506,
+              0.358124
+            ]
+          },
+          "materialize": {
+            "median_seconds": 0.19609552150359377,
+            "seconds": [
+              0.212129,
+              0.207457,
+              0.196012,
+              0.194155,
+              0.186426,
+              0.196179
+            ]
+          }
+        }
+      },
+      "test_packages": {
+        "aivision": {
+          "top_level_pass": 188,
+          "subtests_pass": 318,
+          "skips": [
+            "--- SKIP: TestExportTracePageMemorySQL (0.00s)"
+          ],
+          "real_database_cases": [
+            "--- PASS: TestOceanBaseTraceReadModel (7.93s)",
+            "--- PASS: TestOceanBaseTraceReadModelScopeRetag (4.65s)",
+            "--- PASS: TestOceanBaseProjectionMaintenanceConcurrency (4.46s)",
+            "--- PASS: TestOceanBaseCanonicalSessionReadModel (7.94s)",
+            "--- PASS: TestOceanBaseSessionTokenQuerySemantics (0.29s)",
+            "--- PASS: TestOceanBaseSkillSpans (4.78s)",
+            "--- PASS: TestOceanBaseNativeTracePage (22.58s)",
+            "--- PASS: TestOceanBaseTracePageDimensionsBackfillAndUpdate (4.06s)",
+            "--- PASS: TestOceanBaseRecoveryWindowMergesAndFallsBack (4.19s)"
+          ],
+          "log_sha256": "eaae1888cb26876e5a474f6f84621834bf282b2b3e7afcc20269633984b32cd5"
+        },
+        "ingest": {
+          "top_level_pass": 52,
+          "subtests_pass": 16,
+          "skips": [],
+          "real_database_cases": [
+            "--- PASS: TestOceanBaseProjectionMaintenanceLifecycle (4.35s)",
+            "--- PASS: TestOceanBaseTraceContentColumnAdditiveSemantics (0.53s)"
+          ],
+          "log_sha256": "5d02e0dc1f7c92257f4d38f6fd636d4acdc5ebd5ee3b61e552bada5560d50371"
+        }
+      },
+      "memory_events": {
+        "low": "0",
+        "high": "0",
+        "max": "0",
+        "oom": "0",
+        "oom_kill": "0",
+        "oom_group_kill": "0",
+        "sock_throttled": "0"
+      }
+    },
+    "ce": {
+      "version": "5.7.25-OceanBase_CE-v4.4.2.1",
+      "actual_image": "sha256:8e9c9b91bff288ca574ed414c047356744a645c0a2f149c711c18faebf5ef4ae",
+      "container_memory_bytes": 8589934592,
+      "parameters": {
+        "system_memory": "1G",
+        "memory_limit": "6G"
+      },
+      "warm_c4": {
+        "baseline": {
+          "median_seconds": 0.6530150835169479,
+          "round_seconds": [
+            [
+              0.665446,
+              0.678359,
+              0.672585,
+              0.738212
+            ],
+            [
+              0.66141,
+              0.669187,
+              0.674302,
+              0.6809
+            ],
+            [
+              0.654278,
+              0.633231,
+              0.640558,
+              0.648081
+            ],
+            [
+              0.653133,
+              0.667334,
+              0.648351,
+              0.658208
+            ],
+            [
+              0.652897,
+              0.640184,
+              0.647214,
+              0.626321
+            ],
+            [
+              0.664708,
+              0.639727,
+              0.629907,
+              0.658635
+            ],
+            [
+              0.663758,
+              0.643855,
+              0.658467,
+              0.651366
+            ],
+            [
+              0.582631,
+              0.576995,
+              0.592123,
+              0.597359
+            ]
+          ],
+          "median_phase_seconds": {
+            "metadata": 0.0035343124764040112,
+            "page_preflight": 0.1734162499778904,
+            "page_query": 0.43559885397553444
+          }
+        },
+        "index": {
+          "median_seconds": 0.6432160835247487,
+          "round_seconds": [
+            [
+              0.593671,
+              0.670217,
+              0.664484,
+              0.599315
+            ],
+            [
+              0.84785,
+              0.827635,
+              0.853119,
+              0.841701
+            ],
+            [
+              0.572323,
+              0.634744,
+              0.650695,
+              0.644885
+            ],
+            [
+              0.559364,
+              0.643374,
+              0.634491,
+              0.652594
+            ],
+            [
+              0.631446,
+              0.637826,
+              0.644456,
+              0.571053
+            ],
+            [
+              0.625804,
+              0.651882,
+              0.632908,
+              0.643058
+            ],
+            [
+              0.658229,
+              0.675866,
+              0.665444,
+              0.670438
+            ],
+            [
+              0.634305,
+              0.578946,
+              0.562332,
+              0.568136
+            ]
+          ],
+          "median_phase_seconds": {
+            "metadata": 0.0036211665137670934,
+            "page_preflight": 0.15520383350667544,
+            "page_query": 0.48164556303527206
+          }
+        },
+        "materialize": {
+          "median_seconds": 0.46427789551671594,
+          "round_seconds": [
+            [
+              0.488308,
+              0.481678,
+              0.498063,
+              0.493014
+            ],
+            [
+              0.449845,
+              0.481898,
+              0.475977,
+              0.389764
+            ],
+            [
+              0.457686,
+              0.482104,
+              0.475813,
+              0.471479
+            ],
+            [
+              0.414504,
+              0.420986,
+              0.408559,
+              0.40374
+            ],
+            [
+              0.447791,
+              0.465203,
+              0.454922,
+              0.460357
+            ],
+            [
+              0.468461,
+              0.463353,
+              0.458894,
+              0.450149
+            ],
+            [
+              0.467095,
+              0.460638,
+              0.446164,
+              0.43754
+            ],
+            [
+              0.478392,
+              0.472494,
+              0.490427,
+              0.484868
+            ]
+          ],
+          "median_phase_seconds": {
+            "metadata": 0.002865729504264891,
+            "page_preflight": 0.15161808353150263,
+            "page_query": 0.31256118800956756
+          }
+        },
+        "both": {
+          "median_seconds": 0.4622829370200634,
+          "round_seconds": [
+            [
+              0.481158,
+              0.476735,
+              0.471762,
+              0.465411
+            ],
+            [
+              0.462993,
+              0.458084,
+              0.45232,
+              0.468491
+            ],
+            [
+              0.453552,
+              0.459167,
+              0.431409,
+              0.441624
+            ],
+            [
+              0.400092,
+              0.465247,
+              0.478779,
+              0.472817
+            ],
+            [
+              0.398205,
+              0.403256,
+              0.385798,
+              0.393039
+            ],
+            [
+              0.578945,
+              0.583558,
+              0.567162,
+              0.572585
+            ],
+            [
+              0.457757,
+              0.472955,
+              0.448829,
+              0.467546
+            ],
+            [
+              0.455581,
+              0.467082,
+              0.461573,
+              0.450625
+            ]
+          ],
+          "median_phase_seconds": {
+            "metadata": 0.003220041486201808,
+            "page_preflight": 0.14465352101251483,
+            "page_query": 0.3115514585224446
+          }
+        }
+      },
+      "window_c1": {
+        "0": {
+          "canonical_sha256": "17f98ce0965be9de8f5da82458ee56b11504ad2e7e5e779d78fdd95f19f1732c",
+          "baseline": {
+            "median_seconds": 0.019555041508283466,
+            "seconds": [
+              0.027135,
+              0.016497,
+              0.022613,
+              0.01356,
+              0.023503,
+              0.01294
+            ]
+          },
+          "materialize": {
+            "median_seconds": 0.007951125036925077,
+            "seconds": [
+              0.009457,
+              0.006445,
+              0.016212,
+              0.006057,
+              0.013941,
+              0.005975
+            ]
+          }
+        },
+        "20": {
+          "canonical_sha256": "bddfe368d408aad510cd4421f6ea304dbbf903d35d5a5574d40ffd225229dcad",
+          "baseline": {
+            "median_seconds": 0.024952187988674268,
+            "seconds": [
+              0.037381,
+              0.025144,
+              0.035252,
+              0.02476,
+              0.023336,
+              0.021686
+            ]
+          },
+          "materialize": {
+            "median_seconds": 0.014862270996673033,
+            "seconds": [
+              0.019555,
+              0.015827,
+              0.023055,
+              0.01017,
+              0.012303,
+              0.013898
+            ]
+          }
+        },
+        "200": {
+          "canonical_sha256": "d8d524d41dcf5de72c5e496dded106136c7df9b2a712ff81b21f91411b8d8529",
+          "baseline": {
+            "median_seconds": 0.04985233349725604,
+            "seconds": [
+              0.064291,
+              0.06282,
+              0.052196,
+              0.045648,
+              0.047508,
+              0.045734
+            ]
+          },
+          "materialize": {
+            "median_seconds": 0.02696939601446502,
+            "seconds": [
+              0.036977,
+              0.027681,
+              0.024818,
+              0.031779,
+              0.026258,
+              0.023901
+            ]
+          }
+        },
+        "5000": {
+          "canonical_sha256": "8f3de6d5a1f9c9204ec22d1d7af7a1d3b94da2ab05a0cc18c5828c35a702dd6d",
+          "baseline": {
+            "median_seconds": 0.24720043750130571,
+            "seconds": [
+              0.245193,
+              0.362451,
+              0.258178,
+              0.229977,
+              0.249208,
+              0.224596
+            ]
+          },
+          "materialize": {
+            "median_seconds": 0.17833983298623934,
+            "seconds": [
+              0.170016,
+              0.227861,
+              0.18272,
+              0.179387,
+              0.176865,
+              0.177293
+            ]
+          }
+        }
+      },
+      "test_packages": {
+        "aivision": {
+          "top_level_pass": 188,
+          "subtests_pass": 318,
+          "skips": [
+            "--- SKIP: TestExportTracePageMemorySQL (0.00s)"
+          ],
+          "real_database_cases": [
+            "--- PASS: TestOceanBaseTraceReadModel (6.54s)",
+            "--- PASS: TestOceanBaseTraceReadModelScopeRetag (3.14s)",
+            "--- PASS: TestOceanBaseProjectionMaintenanceConcurrency (3.38s)",
+            "--- PASS: TestOceanBaseCanonicalSessionReadModel (5.83s)",
+            "--- PASS: TestOceanBaseSessionTokenQuerySemantics (0.23s)",
+            "--- PASS: TestOceanBaseSkillSpans (3.07s)",
+            "--- PASS: TestOceanBaseNativeTracePage (24.29s)",
+            "--- PASS: TestOceanBaseTracePageDimensionsBackfillAndUpdate (2.51s)",
+            "--- PASS: TestOceanBaseRecoveryWindowMergesAndFallsBack (3.40s)"
+          ],
+          "log_sha256": "346efd07a1089cc52bf10bd76e08499f46c9c364759d169fb27c33b3d1fa106d"
+        },
+        "ingest": {
+          "top_level_pass": 52,
+          "subtests_pass": 16,
+          "skips": [],
+          "real_database_cases": [
+            "--- PASS: TestOceanBaseProjectionMaintenanceLifecycle (3.61s)",
+            "--- PASS: TestOceanBaseTraceContentColumnAdditiveSemantics (0.52s)"
+          ],
+          "log_sha256": "6838e1825aafce33c350688b8ae88e0e096950e47b92a93d606770a9dd813784"
+        }
+      },
+      "memory_events": {
+        "low": "0",
+        "high": "0",
+        "max": "0",
+        "oom": "0",
+        "oom_kill": "0",
+        "oom_group_kill": "0",
+        "sock_throttled": "0"
+      }
+    }
+  },
+  "validation": {
+    "django_tests_passed": 203,
+    "memory_tests_passed": 14,
+    "stream_metrics_red_then_green": true,
+    "oracle": "real DB handler output plus mocked client/raw-page adapter versus independent NativeTraceWindow; not full public HTTP routing"
+  },
+  "limitations": [
+    "Local fixture medians, not P95 or production capacity.",
+    "Warm C4: eight balanced-order rounds, 32 observations per variant; all rounds included.",
+    "All three SQL phases are timed; schema readiness and HTTP admission are outside the benchmark.",
+    "C1: six alternating rounds per window size, 48 calls per engine.",
+    "Shared process RSS is not a causal memory comparison; no further RSS reduction claim.",
+    "Exact final SQL export matches the materialize experiment; only a source comment was clarified after integration compilation.",
+    "Production traffic, ingestion throughput, distributed CE, x86, near-limit skew, full deployment/browser and multi-day residency remain unverified."
+  ]
+}

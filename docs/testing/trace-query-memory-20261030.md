@@ -2,6 +2,8 @@
 
 Date: 2026-10-30. Local implementation and retest evidence; no image publication or production deployment is implied. [Machine-readable results and tested source hashes](evidence/trace-query-memory-20261030.json) accompany this report.
 
+This is the initial PR snapshot. See the [follow-up analysis and regression results](trace-query-memory-followup-20261030.md) for the later metadata-reuse change and enabled Python differential oracle. Historical measurements below are unchanged.
+
 ## Problem and change
 
 The native Trace page query derived filters, facets and scope from each candidate Span's full JSON attributes/payload. Large non-page inputs therefore consumed query resources even when the caller requested only 50 Traces.
@@ -35,7 +37,7 @@ The actual plans use `page_dimensions_v1` for filter/facet/scope expressions. Me
 ## Environments and methodology
 
 - Native Linux ARM64, two-CPU database cgroup quota, Go 1.25.14 for tests.
-- seekdb: fixed image `oceanbase/seekdb@sha256:4db4961869d554313520d6081fca29265ba6da6db7313311bd8acbed771a956b5ad`, 4 GiB container, verified `memory_budget=2G`.
+- seekdb: fixed image `oceanbase/seekdb@sha256:4db4961869d554313520d6081fca29265ba6da6db7313311bd8acbed771a956b`, 4 GiB container, verified `memory_budget=2G`. The follow-up corrected an extra `5ad` suffix in this report's image reference; the tested local image was correct.
 - CE: fixed image `oceanbase/oceanbase-ce@sha256:eaa2c3b3513fa21e4a658f197c1deb93c9d6b6eb742cfa5ef0f085f82b9cec54`, 8 GiB container, verified `memory_limit=6G`, `system_memory=1G`, 3 GiB test tenant. An isolated host bind mount used a 2 GiB data file and 4 GiB log allocation after the Docker VM lacked space for the initial allocation.
 - The original variant ran first. Process restarts did not clear the host page cache; RSS/cgroup sampling can miss brief peaks. No integration-test traffic ran during the comparison.
 - The harness uses the production SQL builder. seekdb timing includes encoded-page preflight and the page query; CE also includes metadata-size preflight. Schema checks are exercised by integration tests, not the timed SQL.

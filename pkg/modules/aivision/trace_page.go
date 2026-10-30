@@ -621,8 +621,11 @@ func buildTracePageSQL(table, org string, p nativeListParams, maxSpanCount int) 
 	validString := func(expr string) string {
 		return "(" + expr + " IS NULL OR JSON_TYPE(" + expr + ") IN ('NULL','STRING'))"
 	}
+	// Several summaries and facets reuse these compact dimensions. Materialize
+	// them once per statement instead of repeating the metadata scan/extraction.
+	// Metadata preflight bounds its input; raw Span JSON stays outside the CTE.
 	query := `WITH base AS (
-SELECT t.trace_id,t.span_id,t.start_time_unix_nano,t.end_time_unix_nano,t.status_code,` + ingest.TracePageSourceBytesColumn + ` AS source_bytes,
+SELECT /*+ MATERIALIZE */ t.trace_id,t.span_id,t.start_time_unix_nano,t.end_time_unix_nano,t.status_code,` + ingest.TracePageSourceBytesColumn + ` AS source_bytes,
 ` + compact("space") + ` AS scope_space,` + pageText(compact("agent")) + ` AS scope_agent,
 ` + compact("env") + ` AS env_json,` + compact("scene") + ` AS scene_json,
 ` + compact("resource_username") + ` AS resource_username,` + compact("attribute_username") + ` AS attribute_username,
