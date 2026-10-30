@@ -331,6 +331,27 @@ func TestOceanBaseNativeTracePage(t *testing.T) {
 		require.Less(t, len(lastWire), 24*1024*1024)
 	})
 
+	t.Run("decoded_resource_alias_over_budget_returns_413", func(t *testing.T) {
+		// The fixture stores no duplicated payload. Two 7 MiB resources fit
+		// the SQL envelope, but the legacy resource aliases make the final
+		// successful HTTP body exceed 28 MiB. Preflight alone cannot prove it.
+		scope := "large-resource-alias"
+		first, _ := fixture.pair(scope, 7051)
+		second, _ := fixture.pair(scope, 7052)
+		for _, span := range []*tracePageIntegrationSpan{&first, &second} {
+			span.resource["large.resource"] = strings.Repeat("x", 7<<20)
+		}
+		fixture.insert(t, []tracePageIntegrationSpan{first, second})
+		var storedBound int64
+		require.NoError(t, db.QueryRow("SELECT SUM(page_wire_bytes_v1) FROM "+table+" WHERE org_id=? AND space_id=?", fixture.org, scope).Scan(&storedBound))
+		require.Less(t, storedBound+4096, int64(24<<20), "the stored preflight must admit this regression fixture")
+		status, payload := fixture.call(t, h.TracePage, scope, nil)
+		require.Equal(t, http.StatusRequestEntityTooLarge, status)
+		require.Equal(t, "error", payload["status"])
+		require.NotContains(t, payload, "data", "a capacity failure must not return partial Traces")
+		require.Less(t, len(lastWire), 4096)
+	})
+
 	t.Run("stored_wire_bound_covers_escaping_and_updates", func(t *testing.T) {
 		scope := "wire-escaping"
 		span, _ := fixture.pair(scope, 7101)

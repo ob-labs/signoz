@@ -9,9 +9,11 @@ import (
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/SigNoz/signoz/pkg/ingest"
 	"github.com/stretchr/testify/require"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -44,6 +46,77 @@ func TestTracePageBudgetStopsBeforeRawAggregation(t *testing.T) {
 		require.Nil(t, result)
 		require.NoError(t, mock.ExpectationsWereMet())
 	}
+}
+
+// The SQL envelope contains resource_attributes once. Decoding also exposes
+// the legacy resource alias, so its successful wire size can be larger than
+// the stored preflight even for plain ASCII without JSON escaping.
+func TestTracePageHandlerRejectsDecodedResourceAliasOverBudget(t *testing.T) {
+	rows := tracePageTestRows(t)
+	span := rows[2]["result"].(map[string]any)["spans"].([]any)[0].(map[string]any)
+	resource, err := json.Marshal(map[string]any{"aivision.space.id": "space-a", "large.resource": strings.Repeat("x", 13<<20)})
+	require.NoError(t, err)
+	span["resource_attributes"] = string(resource)
+	envelope, err := json.Marshal(rows)
+	require.NoError(t, err)
+	store, mock := pageMemoryStore(t)
+	mock.ExpectBegin()
+	pageMemoryReady(mock)
+	mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"count", "bytes", "max"}).AddRow(1, 512, 512))
+	mock.ExpectQuery("WITH base").WillReturnRows(sqlmock.NewRows([]string{"bytes"}).AddRow(len(envelope) + 4096))
+	mock.ExpectQuery("WITH base").WillReturnRows(sqlmock.NewRows([]string{"trace_page_rows"}).AddRow(string(envelope)))
+	mock.ExpectCommit()
+	h := tracePageUnitHandler(nil)
+	h.backend = store
+	w := httptest.NewRecorder()
+	h.TracePage(w, tracePageUnitRequest(nil, true))
+	require.Equal(t, http.StatusRequestEntityTooLarge, w.Code)
+	require.Less(t, w.Body.Len(), 4096, "an oversized decoded page must return only the capacity error")
+	require.Contains(t, w.Body.String(), `"status":"error"`)
+	require.NotContains(t, w.Body.String(), `"complete":true`)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestTracePageHandlerKeepsExactDecodedJSONOnWire(t *testing.T) {
+	rows := tracePageTestRows(t)
+	inputSpan := rows[2]["result"].(map[string]any)["spans"].([]any)[0].(map[string]any)
+	inputSpan["attributes"] = strings.TrimSuffix(inputSpan["attributes"].(string), "}") + `,"integer_text":"9223372036854775807","explicit_null":null}`
+	envelope, err := json.Marshal(rows)
+	require.NoError(t, err)
+	store, mock := pageMemoryStore(t)
+	mock.ExpectBegin()
+	pageMemoryReady(mock)
+	mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"count", "bytes", "max"}).AddRow(1, 512, 512))
+	mock.ExpectQuery("WITH base").WillReturnRows(sqlmock.NewRows([]string{"bytes"}).AddRow(len(envelope) + 4096))
+	mock.ExpectQuery("WITH base").WillReturnRows(sqlmock.NewRows([]string{"trace_page_rows"}).AddRow(string(envelope)))
+	mock.ExpectCommit()
+	h := tracePageUnitHandler(nil)
+	h.backend = store
+	w := httptest.NewRecorder()
+	h.TracePage(w, tracePageUnitRequest(nil, true))
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.Equal(t, "application/json", w.Header().Get("Content-Type"))
+	decoder := json.NewDecoder(w.Body)
+	decoder.UseNumber()
+	var response map[string]any
+	require.NoError(t, decoder.Decode(&response))
+	page := response["data"].(map[string]any)
+	span := page["data"].([]any)[0].(map[string]any)["spans"].([]any)[0].(map[string]any)
+	attributes := span["attributes"].(map[string]any)
+	require.Equal(t, json.Number("9223372036854775807"), attributes["integer"])
+	require.Equal(t, json.Number("0.12345678901234567890123456789"), attributes["fraction"])
+	require.Equal(t, json.Number("1e-400"), attributes["small"])
+	require.Equal(t, "9223372036854775807", attributes["integer_text"])
+	require.Contains(t, attributes, "explicit_null")
+	require.Nil(t, attributes["explicit_null"])
+	require.Equal(t, "2026-10-01T00:00:00.000000001Z", span["start_time_unix_nano"])
+	require.NotContains(t, span, "status_code")
+	require.NotContains(t, span, "session_id", "absent fields must remain absent")
+	payload := span["payload"].(map[string]any)["attributes"].(map[string]any)
+	require.Contains(t, payload, "null")
+	require.Nil(t, payload["null"])
+	require.Equal(t, span["resource_attributes"], span["resource"])
+	require.NoError(t, mock.ExpectationsWereMet())
 }
 
 // Opt-in export for the reproducible external memory harness. It exports the

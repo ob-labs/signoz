@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/SigNoz/signoz/pkg/http/render"
 	"github.com/SigNoz/signoz/pkg/ingest"
 	"io"
 	"math"
@@ -16,6 +17,7 @@ import (
 )
 
 const nativeTracePageContract = "native-trace-page-v1"
+const tracePagePayloadLimit = 24 * 1024 * 1024
 
 // Resource preflight and page data share a repeatable-read snapshot. Metadata
 // is stored separately from raw payloads; only current-page spans are loaded.
@@ -89,7 +91,21 @@ func (h *handler) TracePage(w http.ResponseWriter, r *http.Request) {
 		h.writeBackendError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	// Stored bounds protect SQL aggregation, but decoding adds the legacy
+	// resource alias and normalizes fields. Measure the final success envelope
+	// with the renderer's serializer, then write those same bytes only once.
+	body, err := traceWindowJSON.Marshal(&render.SuccessResponse{Status: "success", Data: result})
+	if err != nil {
+		h.writeBackendError(w, err)
+		return
+	}
+	if len(body) > tracePagePayloadLimit {
+		writeTraceCapacityError(w, http.StatusRequestEntityTooLarge, "trace page exceeds resource budget: decoded page exceeds 24 MiB encoded budget; reduce page size or narrow the time range")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
 }
 
 type tracePageUnsupported struct{ reason string }
@@ -147,7 +163,7 @@ func (store *oceanBaseStore) tracePage(ctx context.Context, org string, p native
 	if err = tx.QueryRowContext(ctx, preflight, args[:len(args)-len(scopeArgs)-2]...).Scan(&wireBound); err != nil {
 		return nil, err
 	}
-	if wireBound > 24*1024*1024 {
+	if wireBound > tracePagePayloadLimit {
 		return nil, fmt.Errorf("%w: page and facets exceed 24 MiB encoded budget; reduce page size or narrow the time range", errTracePageBudget)
 	}
 	rows, err := scanReadModelRows(ctx, tx, query, args...)
