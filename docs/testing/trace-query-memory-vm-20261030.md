@@ -1,5 +1,7 @@
 # Trace memory follow-up: full-stack Linux VM validation
 
+Higher-load follow-up: [current-source OceanBase CE qualification and the known seekdb upgrade issue](trace-query-memory-stress-20261030.md). The results below retain their original source and workload scope.
+
 Date: 2026-10-30. This extends the [initial memory retest](trace-query-memory-20261030.md) and [SQL follow-up](trace-query-memory-followup-20261030.md). [Machine-readable evidence](evidence/trace-query-memory-vm-20261030.json) includes source-file hashes, image identities, response hashes, successful latency arrays, refusal counts, memory samples, and validation results. These are manual runs, separate from hosted CI.
 
 ## Problems found and fixed
