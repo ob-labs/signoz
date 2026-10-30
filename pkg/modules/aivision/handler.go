@@ -723,7 +723,7 @@ func (h *handler) decodeNativeBatch(response http.ResponseWriter, request *http.
 }
 
 func (h *handler) writeBackendError(rw http.ResponseWriter, err error) {
-	if errors.Is(err, errTraceWindowPayloadBudget) || errors.Is(err, errTracePageBudget) {
+	if errors.Is(err, errTraceWindowResourceBudget) || errors.Is(err, errTraceWindowPayloadBudget) || errors.Is(err, errTracePageBudget) {
 		writeTraceCapacityError(rw, http.StatusRequestEntityTooLarge, err.Error())
 	} else if errors.Is(err, errNotFound) {
 		render.Error(rw, errors.NewNotFoundf(errors.CodeNotFound, "resource not found"))

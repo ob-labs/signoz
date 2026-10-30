@@ -68,11 +68,10 @@ func New(ctx context.Context, settings factory.ProviderSettings, config telemetr
 		db.Close()
 		return nil, errors.WrapInternalf(err, errors.CodeInternal, "connect to OceanBase telemetry store")
 	}
-	// Projection migration is bounded independently from short query deadlines.
-	// A derived-schema failure must not stop the raw telemetry service. The
-	// durable migration fence remains ineligible until retry finishes.
+	// Establish base eligibility synchronously. Optional additive backfill runs
+	// in the provider-owned worker and must not delay the API listener.
 	initCtx, initCancel := context.WithTimeout(ctx, 2*time.Minute)
-	complete, err := initializeProjectionModels(initCtx, db, config.OceanBase.TablePrefix)
+	complete, err := initializeProjectionModelsForStartup(initCtx, db, config.OceanBase.TablePrefix)
 	initCancel()
 	if err != nil && settings.Logger != nil {
 		settings.Logger.Warn("projection maintenance initialization failed; raw queries remain available", "error", err)
@@ -91,6 +90,17 @@ func New(ctx context.Context, settings factory.ProviderSettings, config telemetr
 		})
 	}
 	return result, nil
+}
+
+// Establish the mandatory eligibility fence before serving. Optional generated
+// columns may backfill a large historical table; the owned retry worker handles
+// them without holding the API listener behind that DDL. Pending is not ready.
+func initializeProjectionModelsForStartup(ctx context.Context, db *sql.DB, prefix string) (bool, error) {
+	enabled := ingest.ProjectionMaintenanceEnabled()
+	if err := ingest.InitializeTraceReadModelMaintenance(ctx, db, prefix, enabled); err != nil {
+		return false, err
+	}
+	return !enabled, nil
 }
 
 func initializeProjectionModels(ctx context.Context, db *sql.DB, prefix string) (bool, error) {
@@ -112,6 +122,11 @@ func initializeProjectionModels(ctx context.Context, db *sql.DB, prefix string) 
 		return false, stderrors.Join(statisticsErr, err)
 	}
 	if ready, err := ingest.TraceProjectionSummaryColumnsReady(ctx, db, prefix); err != nil || !ready {
+		return false, stderrors.Join(statisticsErr, err)
+	}
+	// Durable OFF may make the initializer return nil without adding new
+	// columns. Keep recovery pending until the metrics optimization is proven.
+	if ready, err := ingest.TraceProjectionMetricsWindowColumnsReady(ctx, db, prefix); err != nil || !ready {
 		return false, stderrors.Join(statisticsErr, err)
 	}
 	if statisticsErr != nil {
@@ -205,7 +220,9 @@ func retryProjectionMaintenance(ctx context.Context, retryInterval, idleInterval
 		if ctx.Err() != nil {
 			return
 		}
-		attemptCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		// Each initializer enforces its own budget: summary backfill may take
+		// 15 minutes, while base/statistics/content keep two minutes each.
+		attemptCtx, cancel := context.WithTimeout(ctx, ingest.TraceProjectionSummaryMigrationTimeout+6*time.Minute)
 		complete, err := initialize(attemptCtx)
 		cancel()
 		if err == nil && complete {

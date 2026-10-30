@@ -125,7 +125,7 @@ func AddToRouter(router *mux.Router, cfg Config, logger *slog.Logger) error {
 	if err := initializeProjectionMaintenance(initCtx, db, cfg); err != nil {
 		logger.Warn("projection maintenance unavailable; raw ingestion retained with shared eligibility fence", "error", err)
 	}
-	if err := InitializeTraceProjectionSummaries(initCtx, db, cfg.TablePrefix); err != nil {
+	if err := initializeProjectionSummaries(initCtx, db, cfg); err != nil {
 		logger.Warn("projection summaries unavailable; ingestion retained", "error", err)
 	}
 	initCancel()
@@ -154,6 +154,15 @@ func initializeProjectionMaintenance(ctx context.Context, db *sql.DB, cfg Config
 		return nil
 	}
 	return InitializeTraceReadModelMaintenance(ctx, db, cfg.TablePrefix, !cfg.ProjectionMaintenanceDisabled)
+}
+
+func initializeProjectionSummaries(ctx context.Context, db *sql.DB, cfg Config) error {
+	// The managed provider already owns optional migration and retry. Repeating
+	// it here both blocks route registration and competes for the same lease.
+	if cfg.ProjectionMaintenanceManaged {
+		return nil
+	}
+	return InitializeTraceProjectionSummaries(ctx, db, cfg.TablePrefix)
 }
 
 func (ep *endpoint) authorized(r *http.Request) bool {

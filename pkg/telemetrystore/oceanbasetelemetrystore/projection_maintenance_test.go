@@ -9,12 +9,18 @@ import (
 )
 
 func TestProjectionMaintenanceRetryStopsAfterRecovery(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var attempts int
 	retryProjectionMaintenance(ctx, time.Millisecond, time.Hour, func(ctx context.Context) (bool, error) {
-		if _, ok := ctx.Deadline(); !ok {
+		deadline, ok := ctx.Deadline()
+		if !ok {
 			t.Fatal("each migration attempt must have a deadline")
+		}
+		// The outer worker must not truncate a supported large summary
+		// backfill at the former two-minute per-attempt budget.
+		if time.Until(deadline) < 15*time.Minute {
+			t.Fatal("worker truncates the summary backfill budget")
 		}
 		attempts++
 		if attempts == 1 {

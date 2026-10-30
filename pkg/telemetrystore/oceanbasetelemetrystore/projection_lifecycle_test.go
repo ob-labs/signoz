@@ -36,11 +36,14 @@ func expectLifecycleSummariesReady(mock sqlmock.Sqlmock) {
 	for phase := 0; phase < 2; phase++ {
 		columns := [][2]string{{ingest.TraceProjectionMetadataColumn, ingest.TraceProjectionMetadataExpression}, {ingest.TraceProjectionContentColumn, ingest.TraceProjectionContentExpression}}
 		if phase == 0 {
-			columns = append(columns, [2]string{ingest.TraceProjectionMetricsVersionColumn, ingest.TraceProjectionMetricsVersionExpression}, [2]string{ingest.TraceProjectionOperationPreviewsColumn, ingest.TraceProjectionOperationPreviewsExpression})
+			columns = append(columns, [2]string{ingest.TraceProjectionMetricsVersionColumn, ingest.TraceProjectionMetricsVersionExpression}, [2]string{ingest.TraceProjectionOperationPreviewsColumn, ingest.TraceProjectionOperationPreviewsExpression}, [2]string{ingest.TraceProjectionMetricsColumn, ingest.TraceProjectionMetricsExpression}, [2]string{ingest.TraceProjectionRowKeysColumn, ingest.TraceProjectionRowKeysExpression})
 		}
 		for _, column := range columns {
 			mock.ExpectQuery("SELECT COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION").WithArgs("test_trace_projections", column[0]).WillReturnRows(sqlmock.NewRows([]string{"kind", "extra", "expression"}).AddRow("longtext", "STORED GENERATED", column[1]))
 		}
+	}
+	for _, column := range [][2]string{{ingest.TraceProjectionMetadataColumn, ingest.TraceProjectionMetadataExpression}, {ingest.TraceProjectionMetricsColumn, ingest.TraceProjectionMetricsExpression}, {ingest.TraceProjectionRowKeysColumn, ingest.TraceProjectionRowKeysExpression}, {ingest.TraceProjectionOperationPreviewsColumn, ingest.TraceProjectionOperationPreviewsExpression}} {
+		mock.ExpectQuery("SELECT COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION").WithArgs("test_trace_projections", column[0]).WillReturnRows(sqlmock.NewRows([]string{"kind", "extra", "expression"}).AddRow("longtext", "STORED GENERATED", column[1]))
 	}
 }
 
@@ -258,4 +261,58 @@ func TestProjectionLifecycleStatisticsFailureStillChecksSummaryReadiness(t *test
 	require.ErrorIs(t, err, failure)
 	require.False(t, complete, "statistics recovery remains pending after independent summary readiness")
 	require.NoError(t, mock.ExpectationsWereMet(), "an optional statistics failure must not skip summary initialization")
+}
+
+func TestProjectionStartupDefersOptionalBackfillToOwnedRetry(t *testing.T) {
+	t.Setenv("SIGNOZ_AIVISION_PROJECTION_MAINTENANCE_ENABLED", "true")
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	// Establish the mandatory generation/eligibility fence before returning.
+	// No optional statistics or generated-column probes/DDL may block startup.
+	expectLifecycleBaseReady(mock, 7)
+	complete, err := initializeProjectionModelsForStartup(context.Background(), db, "test")
+	require.NoError(t, err)
+	require.False(t, complete, "the provider must schedule its existing owned retry, not declare optional migration complete")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestProjectionStartupBaseFailureRemainsPending(t *testing.T) {
+	t.Setenv("SIGNOZ_AIVISION_PROJECTION_MAINTENANCE_ENABLED", "true")
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	failure := errors.New("base control unavailable")
+	mock.ExpectExec("CREATE TABLE IF NOT EXISTS .*projection_maintenance").WillReturnError(failure)
+	complete, err := initializeProjectionModelsForStartup(context.Background(), db, "test")
+	require.ErrorIs(t, err, failure)
+	require.False(t, complete)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestProjectionLifecycleSuspendedMetricsUpgradeRemainsPending(t *testing.T) {
+	t.Setenv("SIGNOZ_AIVISION_PROJECTION_MAINTENANCE_ENABLED", "true")
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	expectLifecycleBaseReady(mock, 7)
+	expectLifecycleVersion(mock)
+	expectLifecycleStatisticsReady(mock, true)
+	columns := [][2]string{{ingest.TraceProjectionMetadataColumn, ingest.TraceProjectionMetadataExpression}, {ingest.TraceProjectionContentColumn, ingest.TraceProjectionContentExpression}, {ingest.TraceProjectionMetricsVersionColumn, ingest.TraceProjectionMetricsVersionExpression}, {ingest.TraceProjectionOperationPreviewsColumn, ingest.TraceProjectionOperationPreviewsExpression}}
+	for _, column := range columns {
+		mock.ExpectQuery("SELECT COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION").WithArgs("test_trace_projections", column[0]).WillReturnRows(sqlmock.NewRows([]string{"kind", "extra", "expression"}).AddRow("longtext", "STORED GENERATED", column[1]))
+	}
+	for _, column := range []string{ingest.TraceProjectionMetricsColumn, ingest.TraceProjectionRowKeysColumn} {
+		mock.ExpectQuery("SELECT COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION").WithArgs("test_trace_projections", column).WillReturnError(sql.ErrNoRows)
+	}
+	mock.ExpectQuery("SELECT generation FROM .*enabled=TRUE.*suspended=FALSE").WillReturnError(sql.ErrNoRows)
+	for _, column := range columns[:2] {
+		mock.ExpectQuery("SELECT COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION").WithArgs("test_trace_projections", column[0]).WillReturnRows(sqlmock.NewRows([]string{"kind", "extra", "expression"}).AddRow("longtext", "STORED GENERATED", column[1]))
+	}
+	mock.ExpectQuery("SELECT COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION").WithArgs("test_trace_projections", ingest.TraceProjectionMetadataColumn).WillReturnRows(sqlmock.NewRows([]string{"kind", "extra", "expression"}).AddRow("longtext", "STORED GENERATED", ingest.TraceProjectionMetadataExpression))
+	mock.ExpectQuery("SELECT COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION").WithArgs("test_trace_projections", ingest.TraceProjectionMetricsColumn).WillReturnError(sql.ErrNoRows)
+	complete, err := initializeModelsForLifecycle(context.Background(), db)
+	require.NoError(t, err)
+	require.False(t, complete, "resume must retain a live worker for absent metrics helpers")
+	require.NoError(t, mock.ExpectationsWereMet())
 }

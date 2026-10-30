@@ -10,7 +10,17 @@ import (
 	"time"
 )
 
+// Stored columns may rebuild historical multi-GB projection tables. This is
+// maintenance-only work: API/query deadlines and source/wire budgets do not
+// inherit it. Ownership outlives the DDL deadline by a cleanup margin.
+const TraceProjectionSummaryMigrationTimeout = 15 * time.Minute
+const traceProjectionSummaryLeaseDuration = TraceProjectionSummaryMigrationTimeout + 5*time.Minute
+
 const TraceProjectionMetadataColumn = "metadata_json_v1"
+const TraceProjectionMetricsColumn = "metrics_json_v1"
+const TraceProjectionMetricsExpression = "JSON_EXTRACT(row_json,'$._metrics')"
+const TraceProjectionRowKeysColumn = "row_keys_json_v1"
+const TraceProjectionRowKeysExpression = "JSON_KEYS(row_json)"
 const TraceProjectionContentColumn = "content_json_v1"
 const TraceProjectionOperationPreviewsColumn = "operation_previews_json_v1"
 const TraceProjectionOperationPreviewsExpression = "JSON_EXTRACT(row_json,'$._operation_previews')"
@@ -50,7 +60,7 @@ var TraceProjectionMetadataExpression = func() string {
 }()
 
 func traceProjectionSummaryColumns() [][3]string {
-	return [][3]string{{TraceProjectionMetadataColumn, "LONGTEXT", TraceProjectionMetadataExpression}, {TraceProjectionContentColumn, "LONGTEXT", TraceProjectionContentExpression}, {TraceProjectionMetricsVersionColumn, "LONGTEXT", TraceProjectionMetricsVersionExpression}, {TraceProjectionOperationPreviewsColumn, "LONGTEXT", TraceProjectionOperationPreviewsExpression}}
+	return [][3]string{{TraceProjectionMetadataColumn, "LONGTEXT", TraceProjectionMetadataExpression}, {TraceProjectionContentColumn, "LONGTEXT", TraceProjectionContentExpression}, {TraceProjectionMetricsVersionColumn, "LONGTEXT", TraceProjectionMetricsVersionExpression}, {TraceProjectionOperationPreviewsColumn, "LONGTEXT", TraceProjectionOperationPreviewsExpression}, {TraceProjectionMetricsColumn, "LONGTEXT", TraceProjectionMetricsExpression}, {TraceProjectionRowKeysColumn, "LONGTEXT", TraceProjectionRowKeysExpression}}
 }
 
 func traceProjectionSummaryDefinition(ctx context.Context, db statisticsSchemaReader, prefix string, column [3]string) (bool, bool, error) {
@@ -94,11 +104,29 @@ func TraceProjectionOperationPreviewsReady(ctx context.Context, db statisticsSch
 	return ready, err
 }
 
-// The shared lease serializes additive DDL with maintenance/statistics work.
+// Metrics recovery needs both complete observations and a presence proof: the
+// existing metadata object intentionally supplies null for absent fields.
+func TraceProjectionMetricsWindowColumnsReady(ctx context.Context, db statisticsSchemaReader, prefix string) (bool, error) {
+	for _, column := range [][3]string{
+		{TraceProjectionMetadataColumn, "LONGTEXT", TraceProjectionMetadataExpression},
+		{TraceProjectionMetricsColumn, "LONGTEXT", TraceProjectionMetricsExpression},
+		{TraceProjectionRowKeysColumn, "LONGTEXT", TraceProjectionRowKeysExpression},
+		{TraceProjectionOperationPreviewsColumn, "LONGTEXT", TraceProjectionOperationPreviewsExpression},
+	} {
+		ready, _, err := traceProjectionSummaryDefinition(ctx, db, prefix, column)
+		if err != nil || !ready {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+// The shared lease coordinates additive DDL with maintenance/statistics work
+// while unexpired. Expiry does not prove a remote ALTER has stopped.
 // ALTER backfills existing projections without invalidating their revisions,
 // coverage, or the durable operator OFF state. Conflicting columns are retained.
 func InitializeTraceProjectionSummaries(ctx context.Context, db *sql.DB, prefix string) error {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, TraceProjectionSummaryMigrationTimeout)
 	defer cancel()
 	missing := false
 	for _, column := range traceProjectionSummaryColumns() {
@@ -130,7 +158,7 @@ func InitializeTraceProjectionSummaries(ctx context.Context, db *sql.DB, prefix 
 	if err != nil {
 		return err
 	}
-	result, err := db.ExecContext(ctx, "UPDATE "+table+" SET migration_owner=?,migration_until=UNIX_TIMESTAMP()+300 WHERE id=1 AND enabled=TRUE AND suspended=FALSE AND rebuild_required=FALSE AND schema_version=? AND generation=? AND migration_until<UNIX_TIMESTAMP()", owner, ProjectionSchemaVersion, generation)
+	result, err := db.ExecContext(ctx, "UPDATE "+table+fmt.Sprintf(" SET migration_owner=?,migration_until=UNIX_TIMESTAMP()+%d WHERE", int64(traceProjectionSummaryLeaseDuration/time.Second))+" id=1 AND enabled=TRUE AND suspended=FALSE AND rebuild_required=FALSE AND schema_version=? AND generation=? AND migration_until<UNIX_TIMESTAMP()", owner, ProjectionSchemaVersion, generation)
 	if err != nil {
 		return err
 	}
@@ -141,12 +169,20 @@ func InitializeTraceProjectionSummaries(ctx context.Context, db *sql.DB, prefix 
 	if n != 1 {
 		return fmt.Errorf("projection summary additive migration lease unavailable")
 	}
+	ddlStarted, ddlCompleted := false, false
 	defer func() {
+		// Cancellation or a connection error does not prove the server has
+		// stopped an ALTER. Retain the lease instead of releasing it early
+		// unless the server acknowledged completion. Its TTL is coordination,
+		// not a server-side DDL deadline or proof of termination.
+		if ddlStarted && !ddlCompleted {
+			return
+		}
 		releaseCtx, releaseCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer releaseCancel()
 		_, _ = db.ExecContext(releaseCtx, "UPDATE "+table+" SET migration_owner='',migration_until=0 WHERE id=1 AND migration_owner=? AND generation=?", owner, generation)
 	}()
-	return withProjectionMigrationConnection(ctx, db, func(conn *sql.Conn) error {
+	return withProjectionMigrationTimeout(ctx, db, TraceProjectionSummaryMigrationTimeout, func(conn *sql.Conn) error {
 		additions := []string{}
 		for _, column := range traceProjectionSummaryColumns() {
 			ready, exists, err := traceProjectionSummaryDefinition(ctx, conn, prefix, column)
@@ -165,9 +201,11 @@ func InitializeTraceProjectionSummaries(ctx context.Context, db *sql.DB, prefix 
 			// These expressions depend only on row_json. Add all missing columns
 			// together so an upgrade backfills the existing table once, after
 			// every existing definition has been rechecked under the lease.
+			ddlStarted = true
 			if _, err := conn.ExecContext(ctx, "ALTER TABLE "+tableName(prefix, "trace_projections")+" "+strings.Join(additions, ",")); err != nil {
 				return err
 			}
+			ddlCompleted = true
 		}
 		for _, column := range traceProjectionSummaryColumns() {
 			ready, _, err := traceProjectionSummaryDefinition(ctx, conn, prefix, column)

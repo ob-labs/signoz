@@ -3,7 +3,9 @@ package ingest
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -56,6 +58,7 @@ func TestProjectionSummaryMigrationUsesOneAlterForOnlyMissingColumns(t *testing.
 	}{
 		{"all_missing", map[string]bool{}, false},
 		{"partial_existing", map[string]bool{TraceProjectionMetadataColumn: true, TraceProjectionMetricsVersionColumn: true}, false},
+		{"upgrade_existing_summaries", map[string]bool{TraceProjectionMetadataColumn: true, TraceProjectionContentColumn: true, TraceProjectionMetricsVersionColumn: true, TraceProjectionOperationPreviewsColumn: true}, false},
 		{"completed_before_lease", map[string]bool{}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -98,9 +101,9 @@ func TestProjectionSummaryMigrationUsesOneAlterForOnlyMissingColumns(t *testing.
 
 func expectProjectionSummaryMigrationLease(mock sqlmock.Sqlmock) {
 	mock.ExpectQuery("SELECT generation FROM .*enabled=TRUE.*suspended=FALSE.*rebuild_required=FALSE").WithArgs(ProjectionSchemaVersion).WillReturnRows(sqlmock.NewRows([]string{"generation"}).AddRow(7))
-	mock.ExpectExec("UPDATE .*SET migration_owner=\\?,migration_until=UNIX_TIMESTAMP\\(\\)\\+300 WHERE").WithArgs(sqlmock.AnyArg(), ProjectionSchemaVersion, int64(7)).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec("UPDATE .*SET migration_owner=\\?,migration_until=UNIX_TIMESTAMP\\(\\)\\+1200 WHERE").WithArgs(sqlmock.AnyArg(), ProjectionSchemaVersion, int64(7)).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery("SELECT @@session.ob_query_timeout").WillReturnRows(sqlmock.NewRows([]string{"timeout"}).AddRow(10000000))
-	mock.ExpectExec("SET SESSION ob_query_timeout=120000000").WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("SET SESSION ob_query_timeout=900000000").WillReturnResult(sqlmock.NewResult(0, 0))
 }
 
 func expectProjectionSummaryMigrationRelease(mock sqlmock.Sqlmock) {
@@ -113,11 +116,11 @@ func TestProjectionSummaryMigrationRechecksConflictBeforeAnyAlter(t *testing.T) 
 	require.NoError(t, err)
 	defer db.Close()
 	probe := "SELECT COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION"
-	for range 4 {
+	for range 6 {
 		mock.ExpectQuery(probe).WillReturnError(sql.ErrNoRows)
 	}
 	expectProjectionSummaryMigrationLease(mock)
-	for i, column := range traceProjectionSummaryColumns() {
+	for i, column := range traceProjectionSummaryColumns()[:4] {
 		expect := mock.ExpectQuery(probe).WithArgs("test_trace_projections", column[0])
 		if i == 3 {
 			expect.WillReturnRows(projectionSummaryColumnRows("longtext", "", "'{}'"))
@@ -140,7 +143,7 @@ func TestProjectionSummaryMigrationPreservesConflictAndDurableOff(t *testing.T) 
 			if conflict {
 				mock.ExpectQuery("SELECT COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION").WillReturnRows(projectionSummaryColumnRows("longtext", "", "'{}'"))
 			} else {
-				for range 4 {
+				for range 6 {
 					mock.ExpectQuery("SELECT COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION").WillReturnError(sql.ErrNoRows)
 				}
 				mock.ExpectQuery("SELECT generation FROM").WillReturnError(sql.ErrNoRows)
@@ -187,6 +190,17 @@ func TestOceanBaseProjectionSummaryColumnsBackfillAndUpdates(t *testing.T) {
 	ready, err := TraceProjectionSummaryColumnsReady(ctx, db, prefix)
 	require.NoError(t, err)
 	require.True(t, ready)
+	ready, err = TraceProjectionMetricsWindowColumnsReady(ctx, db, prefix)
+	require.NoError(t, err)
+	require.True(t, ready)
+	var storedMetrics, storedKeys string
+	require.NoError(t, db.QueryRow("SELECT metrics_json_v1,row_keys_json_v1 FROM "+tableName(prefix, "trace_projections")+" WHERE id=1").Scan(&storedMetrics, &storedKeys))
+	require.JSONEq(t, `{"version":"private"}`, storedMetrics)
+	var originalKeys []string
+	require.NoError(t, json.Unmarshal([]byte(storedKeys), &originalKeys))
+	require.Contains(t, originalKeys, "_metrics")
+	require.Contains(t, originalKeys, "userId")
+	require.NotContains(t, originalKeys, "environment")
 	var backfilledVersion string
 	require.NoError(t, db.QueryRow("SELECT "+TraceProjectionMetricsVersionColumn+" FROM "+tableName(prefix, "trace_projections")+" WHERE id=1").Scan(&backfilledVersion))
 	require.Equal(t, "private", backfilledVersion)
@@ -219,6 +233,12 @@ func TestOceanBaseProjectionSummaryColumnsBackfillAndUpdates(t *testing.T) {
 	require.NoError(t, db.QueryRow("SELECT "+TraceProjectionMetadataColumn+","+TraceProjectionContentColumn+" FROM "+tableName(prefix, "trace_projections")+" WHERE id=1").Scan(&metadata, &content))
 	require.Contains(t, content, "new tail")
 	require.NotContains(t, metadata, "9007199254740993")
+	var removedMetrics sql.NullString
+	require.NoError(t, db.QueryRow("SELECT metrics_json_v1,row_keys_json_v1 FROM "+tableName(prefix, "trace_projections")+" WHERE id=1").Scan(&removedMetrics, &storedKeys))
+	require.False(t, removedMetrics.Valid)
+	require.NoError(t, json.Unmarshal([]byte(storedKeys), &originalKeys))
+	require.NotContains(t, originalKeys, "_metrics")
+	require.NotContains(t, originalKeys, "userId")
 	var removedVersion sql.NullString
 	require.NoError(t, db.QueryRow("SELECT "+TraceProjectionMetricsVersionColumn+" FROM "+tableName(prefix, "trace_projections")+" WHERE id=1").Scan(&removedVersion))
 	require.False(t, removedVersion.Valid)
@@ -264,4 +284,89 @@ func TestOceanBaseProjectionSummaryColumnsBackfillAndUpdates(t *testing.T) {
 	require.True(t, enabled)
 	require.EqualValues(t, 7, generation)
 	require.NoError(t, InitializeTraceProjectionSummaries(ctx, db, prefix))
+}
+
+func TestMetricsWindowCapabilityRequiresEveryExactStoredColumn(t *testing.T) {
+	columns := [][2]string{{TraceProjectionMetadataColumn, TraceProjectionMetadataExpression}, {TraceProjectionMetricsColumn, TraceProjectionMetricsExpression}, {TraceProjectionRowKeysColumn, TraceProjectionRowKeysExpression}, {TraceProjectionOperationPreviewsColumn, TraceProjectionOperationPreviewsExpression}}
+	for rejected := range columns {
+		for _, kind := range []string{"missing", "ordinary", "virtual", "changed", "exact"} {
+			t.Run(fmt.Sprintf("%d_%s", rejected, kind), func(t *testing.T) {
+				db, mock, err := sqlmock.New()
+				require.NoError(t, err)
+				defer db.Close()
+				for i, column := range columns {
+					rows := projectionSummaryColumnRows("longtext", "STORED GENERATED", column[1])
+					if i == rejected {
+						switch kind {
+						case "missing":
+							rows = sqlmock.NewRows([]string{"kind", "extra", "expression"})
+						case "ordinary":
+							rows = projectionSummaryColumnRows("longtext", "", column[1])
+						case "virtual":
+							rows = projectionSummaryColumnRows("longtext", "VIRTUAL GENERATED", column[1])
+						case "changed":
+							rows = projectionSummaryColumnRows("longtext", "STORED GENERATED", "'{}'")
+						}
+					}
+					mock.ExpectQuery("SELECT COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION").WithArgs("test_trace_projections", column[0]).WillReturnRows(rows)
+					if i == rejected && kind != "exact" {
+						break
+					}
+				}
+				ready, err := TraceProjectionMetricsWindowColumnsReady(context.Background(), db, "test")
+				require.NoError(t, err)
+				require.Equal(t, kind == "exact", ready)
+				require.NoError(t, mock.ExpectationsWereMet())
+			})
+		}
+	}
+}
+
+func TestProjectionSummaryCancelledDDLRetainsLeaseUntilSafeExpiry(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	for _, column := range traceProjectionSummaryColumns() {
+		mock.ExpectQuery("SELECT COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION").WithArgs("test_trace_projections", column[0]).WillReturnError(sql.ErrNoRows)
+	}
+	expectProjectionSummaryMigrationLease(mock)
+	for _, column := range traceProjectionSummaryColumns() {
+		mock.ExpectQuery("SELECT COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION").WithArgs("test_trace_projections", column[0]).WillReturnError(sql.ErrNoRows)
+	}
+	mock.ExpectExec("ALTER TABLE").WillDelayFor(time.Second).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec("SET SESSION ob_query_timeout=10000000").WillReturnResult(sqlmock.NewResult(0, 0))
+	// A cancelled client cannot prove remote DDL has stopped. Do not release
+	// ownership early and permit another migrator while that DDL may still run.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	require.Error(t, InitializeTraceProjectionSummaries(ctx, db, "test"))
+	require.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// Observe the external lease mutation: a network failure cannot establish
+// whether the server stopped its ALTER even while the caller context is live.
+type projectionSummaryReleaseObserver struct{ called *bool }
+
+func (a projectionSummaryReleaseObserver) Match(driver.Value) bool { *a.called = true; return true }
+
+func TestProjectionSummaryNetworkFailureDoesNotReleaseUnconfirmedDDL(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	for _, column := range traceProjectionSummaryColumns() {
+		mock.ExpectQuery("SELECT COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION").WithArgs("test_trace_projections", column[0]).WillReturnError(sql.ErrNoRows)
+	}
+	expectProjectionSummaryMigrationLease(mock)
+	for _, column := range traceProjectionSummaryColumns() {
+		mock.ExpectQuery("SELECT COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION").WithArgs("test_trace_projections", column[0]).WillReturnError(sql.ErrNoRows)
+	}
+	failure := errors.New("connection lost while waiting for ALTER")
+	mock.ExpectExec("ALTER TABLE").WillReturnError(failure)
+	mock.ExpectExec("SET SESSION ob_query_timeout=10000000").WillReturnResult(sqlmock.NewResult(0, 0))
+	released := false
+	// Intentionally optional expectation: observe an unsafe mutation if sent.
+	mock.ExpectExec("UPDATE .*SET migration_owner='',migration_until=0 WHERE").WithArgs(projectionSummaryReleaseObserver{&released}, int64(7)).WillReturnResult(sqlmock.NewResult(0, 1))
+	require.ErrorIs(t, InitializeTraceProjectionSummaries(context.Background(), db, "test"), failure)
+	require.False(t, released, "an unconfirmed remote ALTER must retain its bounded lease")
 }
