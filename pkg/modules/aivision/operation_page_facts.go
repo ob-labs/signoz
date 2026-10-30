@@ -8,7 +8,7 @@ import (
 )
 
 func operationFactsColumnsSQL() string {
-	return ",c.model,c.provider,c.ambiguous,CAST(c.input_tokens AS CHAR) AS input_tokens,CAST(c.output_tokens AS CHAR) AS output_tokens,CAST(c.total_tokens AS CHAR) AS total_tokens,CAST(c.cache_read_input_tokens AS CHAR) AS cache_read_input_tokens,CAST(c.cache_write_input_tokens AS CHAR) AS cache_write_input_tokens,CAST(c.reasoning_tokens AS CHAR) AS reasoning_tokens,JSON_EXTRACT(p.row_json,CONCAT('$._operation_previews.',JSON_QUOTE(c.observation_id))) AS operation_preview"
+	return ",c.model,c.provider,c.ambiguous,CAST(c.input_tokens AS CHAR) AS input_tokens,CAST(c.output_tokens AS CHAR) AS output_tokens,CAST(c.total_tokens AS CHAR) AS total_tokens,CAST(c.cache_read_input_tokens AS CHAR) AS cache_read_input_tokens,CAST(c.cache_write_input_tokens AS CHAR) AS cache_write_input_tokens,CAST(c.reasoning_tokens AS CHAR) AS reasoning_tokens"
 }
 
 func validateOperationPreview(preview map[string]any) error {

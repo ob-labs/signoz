@@ -3,6 +3,7 @@ package oceanbasetelemetrystore
 import (
 	"context"
 	"database/sql"
+	stderrors "errors"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
@@ -103,12 +104,19 @@ func initializeProjectionModels(ctx context.Context, db *sql.DB, prefix string) 
 	// OceanBase 4.4+ uses grouping sets; recognized seekdb 1.4+ uses a compatible
 	// grouping-axis query over the same optional typed storage. Older/unknown
 	// engines retain the complete metrics-window contract.
-	if err := ingest.InitializeTraceStatistics(ctx, db, prefix); err != nil {
-		return false, err
+	statisticsErr := ingest.InitializeTraceStatistics(ctx, db, prefix)
+	// Restore compact summaries even when optional statistics inspection fails.
+	// Content failure retains coverage over compact metadata and a pending retry;
+	// it must not block already-supported statistics or canonical list pages.
+	if err := ingest.InitializeTraceProjectionSummaries(ctx, db, prefix); err != nil {
+		return false, stderrors.Join(statisticsErr, err)
 	}
-	// Keep the existing statistics initializer independent of this optional
-	// helper. Content failure retains JSON coverage and a pending retry; it must
-	// not prevent otherwise supported statistics from becoming usable.
+	if ready, err := ingest.TraceProjectionSummaryColumnsReady(ctx, db, prefix); err != nil || !ready {
+		return false, stderrors.Join(statisticsErr, err)
+	}
+	if statisticsErr != nil {
+		return false, statisticsErr
+	}
 	if err := ingest.InitializeTraceContentColumn(ctx, db, prefix); err != nil {
 		return false, err
 	}

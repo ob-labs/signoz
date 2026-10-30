@@ -23,7 +23,7 @@ func pageMemoryStore(t *testing.T) (*oceanBaseStore, sqlmock.Sqlmock) {
 	return &oceanBaseStore{db: db, cfg: config{TablePrefix: "test", MaxLimit: 10000}}, mock
 }
 func pageMemoryReady(mock sqlmock.Sqlmock) {
-	for _, col := range [][3]string{{ingest.TracePageDimensionsColumn, "longtext", ingest.TracePageDimensionsExpression}, {ingest.TracePageSourceBytesColumn, "bigint", ingest.TracePageSourceBytesExpression}} {
+	for _, col := range [][3]string{{ingest.TracePageDimensionsColumn, "longtext", ingest.TracePageDimensionsExpression}, {ingest.TracePageSourceBytesColumn, "bigint", ingest.TracePageSourceBytesExpression}, {ingest.TracePageWireBytesColumn, "bigint", ingest.TracePageWireBytesExpression}} {
 		mock.ExpectQuery("SELECT COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION").WithArgs("test_traces", col[0]).WillReturnRows(sqlmock.NewRows([]string{"type", "extra", "expression"}).AddRow(col[1], "STORED GENERATED", col[2]))
 	}
 }
@@ -85,9 +85,13 @@ func TestOceanBaseTracePageDimensionsBackfillAndUpdate(t *testing.T) {
 	_, err = db.Exec("CREATE TABLE " + table + " LIKE signoz_traces")
 	require.NoError(t, err)
 	defer db.Exec("DROP TABLE " + table)
-	for _, column := range []string{ingest.TracePageDimensionsColumn, ingest.TracePageSourceBytesColumn} {
-		_, err = db.Exec("ALTER TABLE " + table + " DROP COLUMN " + column)
-		require.NoError(t, err)
+	for _, column := range []string{ingest.TracePageDimensionsColumn, ingest.TracePageSourceBytesColumn, ingest.TracePageWireBytesColumn} {
+		var exists int
+		require.NoError(t, db.QueryRow("SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=?", prefix+"_traces", column).Scan(&exists))
+		if exists > 0 {
+			_, err = db.Exec("ALTER TABLE " + table + " DROP COLUMN " + column)
+			require.NoError(t, err)
+		}
 	}
 	fixture := tracePageIntegrationFixture{db: db, table: table, org: "test", start: time.Now()}
 	root, _ := fixture.pair("space", 1)
@@ -99,9 +103,10 @@ func TestOceanBaseTracePageDimensionsBackfillAndUpdate(t *testing.T) {
 	require.NoError(t, ingest.InitializeTracePageDimensions(context.Background(), db, prefix))
 	check := func(want string) {
 		var raw string
-		var stored, actual int64
-		require.NoError(t, db.QueryRow("SELECT page_dimensions_v1,page_source_bytes_v1,"+nativeSpanSourceBytesSQL()+" FROM "+table).Scan(&raw, &stored, &actual))
+		var stored, actual, bound, encoded int64
+		require.NoError(t, db.QueryRow("SELECT page_dimensions_v1,page_source_bytes_v1,"+nativeSpanSourceBytesSQL()+",page_wire_bytes_v1,OCTET_LENGTH("+tracePageSpanJSON()+") FROM "+table+" b").Scan(&raw, &stored, &actual, &bound, &encoded))
 		require.Equal(t, actual, stored)
+		require.GreaterOrEqual(t, bound, encoded)
 		var metadata map[string]any
 		require.NoError(t, json.Unmarshal([]byte(raw), &metadata))
 		require.Equal(t, want, metadata["attribute_username"])

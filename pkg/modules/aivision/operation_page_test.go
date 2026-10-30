@@ -48,7 +48,7 @@ func TestOperationPageAcceptsExplicitBoundedFacts(t *testing.T) {
 }
 
 func operationFactRows(preview any) *sqlmock.Rows {
-	return sqlmock.NewRows([]string{"trace_id", "observation_id", "type", "start_ns", "source_revision", "span_count", "model", "provider", "ambiguous", "input_tokens", "output_tokens", "total_tokens", "cache_read_input_tokens", "cache_write_input_tokens", "reasoning_tokens", "operation_preview"}).AddRow("a", "f", "GENERATION", "150000001", 7, 3, "model", "provider", false, "9007199254740993", "7", "9007199254741000", "0", nil, nil, preview)
+	return sqlmock.NewRows([]string{"trace_id", "observation_id", "type", "start_ns", "source_revision", "span_count", "model", "provider", "ambiguous", "input_tokens", "output_tokens", "total_tokens", "cache_read_input_tokens", "cache_write_input_tokens", "reasoning_tokens"}).AddRow("a", "f", "GENERATION", "150000001", 7, 3, "model", "provider", false, "9007199254740993", "7", "9007199254741000", "0", nil, nil)
 }
 
 func TestOperationPageFactsPreserveExactTokensAndBoundedPreview(t *testing.T) {
@@ -59,7 +59,9 @@ func TestOperationPageFactsPreserveExactTokensAndBoundedPreview(t *testing.T) {
 	p := windowTestParams()
 	p.OperationFacts = true
 	expectOperationReadGate(mock, 0, 1)
-	mock.ExpectQuery(`SELECT .*JSON_EXTRACT\(p.row_json,CONCAT`).WillReturnRows(operationFactRows(`{"name":"LLM","latency":12.5,"status":1,"input":"\"question\"","output":"\"answer\"","input_truncated":false,"output_truncated":true}`))
+	expectOperationPreviewCapability(mock)
+	mock.ExpectQuery(`SELECT t.trace_id,c.observation_id`).WillReturnRows(operationFactRows(`{"name":"LLM","latency":12.5,"status":1,"input":"\"question\"","output":"\"answer\"","input_truncated":false,"output_truncated":true}`))
+	expectOperationPreviewMap(mock, `{"name":"LLM","latency":12.5,"status":1,"input":"\"question\"","output":"\"answer\"","input_truncated":false,"output_truncated":true}`)
 	mock.ExpectCommit()
 	result, err := s.traceOperationPage(context.Background(), "org", p, 1)
 	require.NoError(t, err)
@@ -78,7 +80,9 @@ func TestOperationPageFactsDeclineMissingOrOversizePreviews(t *testing.T) {
 		p := windowTestParams()
 		p.OperationFacts = true
 		expectOperationReadGate(mock, 0, 1)
-		mock.ExpectQuery(`SELECT .*JSON_EXTRACT\(p.row_json,CONCAT`).WillReturnRows(operationFactRows(preview))
+		expectOperationPreviewCapability(mock)
+		mock.ExpectQuery(`SELECT t.trace_id,c.observation_id`).WillReturnRows(operationFactRows(preview))
+		expectOperationPreviewMap(mock, preview)
 		mock.ExpectRollback()
 		result, err := s.traceOperationPage(context.Background(), "org", p, 1)
 		require.NoError(t, err)

@@ -2,6 +2,8 @@
 
 Date: 2026-10-30. This report supplements the [initial memory retest](trace-query-memory-20261030.md). It compares further changes with the already optimized PRs, not with the original payload-scanning implementation. [Machine-readable measurements, source identities and test results](evidence/trace-query-memory-followup-20261030.json) accompany it.
 
+The later [full-stack Linux VM follow-up](trace-query-memory-vm-20261030.md) implements selected directions below and exercises the public HTTP stack on seekdb and OB CE. The measurements and unverified scope in this report remain the historical snapshot.
+
 ## Changes retained
 
 **SigNoz:** materialize the compact `base` CTE once per SQL statement. Previously several summaries and facets repeated the same metadata scan and JSON extraction. In the measured page plans, metadata table access nodes fall from six to one on seekdb and seven to one on CE. Raw Span JSON remains outside that CTE and is assembled only for the selected page. The metadata-size preflight and encoded-page preflight remain in the same repeatable-read transaction as the page query; the change does not remove either preflight, alter filters, or truncate results.

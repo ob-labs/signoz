@@ -36,10 +36,12 @@ func TestMetadataTraceCoverageDoesNotRequestJSONLOB(t *testing.T) {
 	s := &oceanBaseStore{db: db, cfg: config{TablePrefix: "test"}}
 	mock.ExpectBegin()
 	expectProjectionMaintenance(mock, true, false)
+	expectProjectionSummaryCapability(mock)
 	mock.ExpectQuery("SELECT complete FROM").WillReturnRows(sqlmock.NewRows([]string{"complete"}).AddRow(true))
 	mock.ExpectQuery("coverage_without_lob").WillReturnRows(sqlmock.NewRows([]string{"stale", "boundary", "incomplete_content"}).AddRow(0, 0, 0))
 	mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
-	mock.ExpectQuery("SELECT JSON_OBJECT").WillReturnRows(sqlmock.NewRows([]string{"row_json", "preview_json", "source_revision"}))
+	mock.ExpectQuery("SELECT COALESCE\\(SUM\\(selected_bytes").WillReturnRows(sqlmock.NewRows([]string{"bytes"}).AddRow(0))
+	mock.ExpectQuery("SELECT p.metadata_json_v1").WillReturnRows(sqlmock.NewRows([]string{"row_json", "preview_json", "source_revision"}))
 	for range 4 {
 		mock.ExpectQuery("SELECT").WillReturnRows(sqlmock.NewRows([]string{"value", "count"}))
 	}
@@ -79,6 +81,7 @@ func TestReadModelPageDeclinesIncompleteContentBeforeFilteredCounts(t *testing.T
 	s := &oceanBaseStore{db: db, cfg: config{TablePrefix: "test"}}
 	mock.ExpectBegin()
 	expectProjectionMaintenance(mock, true, false)
+	expectProjectionSummaryCapability(mock)
 	mock.ExpectQuery("SELECT complete FROM").WillReturnRows(sqlmock.NewRows([]string{"complete"}).AddRow(true))
 	expectContentCapability(mock, false)
 	mock.ExpectQuery("SELECT COALESCE").WillReturnRows(sqlmock.NewRows([]string{"stale", "boundary", "incomplete_content"}).AddRow(0, 0, 1))
@@ -119,6 +122,7 @@ func TestSessionPageDeclinesIncompleteContentBeforeGroupSelection(t *testing.T) 
 	s := &oceanBaseStore{db: db, cfg: config{TablePrefix: "test"}}
 	mock.ExpectBegin()
 	expectProjectionMaintenance(mock, true, false)
+	expectProjectionSummaryCapability(mock)
 	mock.ExpectQuery("SELECT complete FROM").WillReturnRows(sqlmock.NewRows([]string{"complete"}).AddRow(true))
 	expectContentCapability(mock, false)
 	mock.ExpectQuery("SELECT COALESCE").WillReturnRows(sqlmock.NewRows([]string{"stale", "boundary", "incomplete_content"}).AddRow(0, 0, 1))

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/SigNoz/signoz/pkg/ingest"
 	"github.com/SigNoz/signoz/pkg/types/authtypes"
 	"github.com/stretchr/testify/require"
 )
@@ -44,9 +45,12 @@ func TestDirtySupplementKeepsOriginalQueryAndAddsOnlyRequestedCandidates(t *test
 			response := runDirtySupplementRequest(t, suffix, func(mock sqlmock.Sqlmock) {
 				mock.ExpectBegin()
 				expectProjectionMaintenance(mock, true, false)
+				if required != "" {
+					mock.ExpectQuery("SELECT COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION").WithArgs("test_trace_projections", ingest.TraceProjectionMetricsVersionColumn).WillReturnRows(sqlmock.NewRows([]string{"kind", "extra", "expression"}).AddRow("longtext", "STORED GENERATED", ingest.TraceProjectionMetricsVersionExpression))
+				}
 				query := "SELECT s.trace_id,s.source_revision FROM `test_trace_sources` s LEFT JOIN `test_trace_projections` p ON p.org_id=s.org_id AND p.space_id=s.space_id AND p.trace_id=s.trace_id WHERE s.org_id=? AND s.space_id=? AND (s.scope_valid=FALSE OR s.dirty=TRUE OR p.trace_id IS NULL OR p.source_revision<>s.source_revision OR p.semantics_version<>1 OR p.projection_context<>?"
 				if required != "" {
-					query += " OR BINARY COALESCE(JSON_UNQUOTE(JSON_EXTRACT(p.row_json,'$._metrics.version')),'')<>BINARY ?"
+					query += " OR BINARY COALESCE(p.metrics_version_v1,'')<>BINARY ?"
 				}
 				query += ") AND s.trace_id>? ORDER BY BINARY s.trace_id LIMIT ?"
 				expectation := mock.ExpectQuery(regexp.QuoteMeta(query))

@@ -124,7 +124,59 @@ func TestOceanBaseCanonicalSessionReadModel(t *testing.T) {
 		require.Equal(t, strategy, meta["sessionTokenQueryStrategy"])
 		return result
 	}
+	// The raw selected page exceeds the response budget because of removable
+	// private statistics, while its persisted canonical summaries remain small.
+	// A raw-row-size guard would regress this complete, previously valid page.
+	ready, readyErr := ingest.TraceProjectionSummaryColumnsReady(ctx, db, prefix)
+	require.NoError(t, readyErr)
+	require.True(t, ready)
+	for i := 1; i <= 7; i++ {
+		_, e := db.Exec("UPDATE "+store.readModelTable("trace_projections")+" SET row_json=JSON_SET(row_json,'$._statistics',?) WHERE trace_id=?", strings.Repeat("removed statistics ", 180000), fmt.Sprintf("%032x", i))
+		require.NoError(t, e)
+	}
+	var rawBytes int64
+	require.NoError(t, db.QueryRow("SELECT SUM(OCTET_LENGTH(row_json)) FROM "+store.readModelTable("trace_projections")).Scan(&rawBytes))
+	require.Greater(t, rawBytes, int64(sessionPagePayloadLimit))
 	result := get(p)
+	canonicalParams := p.nativeListParams
+	canonicalParams.MetadataOnly = true
+	canonicalPage, e := store.readModelPage(ctx, org, canonicalParams)
+	require.NoError(t, e)
+	require.Equal(t, true, canonicalPage.(map[string]any)["supported"])
+	require.Len(t, canonicalPage.(map[string]any)["data"], 6)
+	// Selected previews exceed the page budget together while each remains
+	// below the engine's default 16 MiB packet limit. Both complete Sessions
+	// and the canonical page select these four in-scope Trace rows.
+	priorPreviews := make(map[string]string)
+	var previewBytes int64
+	for i := 1; i <= 4; i++ {
+		previewTrace := fmt.Sprintf("%032x", i)
+		var priorPreview string
+		require.NoError(t, db.QueryRow("SELECT preview_json FROM "+store.readModelTable("trace_projections")+" WHERE trace_id=?", previewTrace).Scan(&priorPreview))
+		priorPreviews[previewTrace] = priorPreview
+		_, e = db.Exec("UPDATE "+store.readModelTable("trace_projections")+" SET preview_json=JSON_OBJECT('input',REPEAT('x',?)) WHERE trace_id=?", 5<<20, previewTrace)
+		require.NoError(t, e)
+		var rowBytes int64
+		require.NoError(t, db.QueryRow("SELECT OCTET_LENGTH(preview_json) FROM "+store.readModelTable("trace_projections")+" WHERE trace_id=?", previewTrace).Scan(&rowBytes))
+		previewBytes += rowBytes
+	}
+	require.Greater(t, previewBytes, int64(sessionPagePayloadLimit))
+	oversizedSession, e := store.sessionReadModelPage(ctx, org, p)
+	require.NoError(t, e)
+	require.Equal(t, readModelUnsupported("session_page_payload_limit"), oversizedSession)
+	oversizedTrace, e := store.readModelPage(ctx, org, canonicalParams)
+	require.NoError(t, e)
+	require.Equal(t, readModelUnsupported("projection_page_payload_limit"), oversizedTrace)
+	firstTracePage := canonicalParams
+	firstTracePage.Limit = 1
+	offPageLarge, e := store.readModelPage(ctx, org, firstTracePage)
+	require.NoError(t, e)
+	require.Equal(t, true, offPageLarge.(map[string]any)["supported"], "an oversized off-page preview must not reject a bounded selected page")
+	require.Equal(t, 6, offPageLarge.(map[string]any)["meta"].(map[string]any)["totalItems"])
+	for previewTrace, priorPreview := range priorPreviews {
+		_, e = db.Exec("UPDATE "+store.readModelTable("trace_projections")+" SET preview_json=? WHERE trace_id=?", priorPreview, previewTrace)
+		require.NoError(t, e)
+	}
 	require.Equal(t, 4, result["meta"].(map[string]any)["totalItems"])
 	for _, group := range result["data"].([]map[string]any) {
 		if group["session_id"] == "session-two" {

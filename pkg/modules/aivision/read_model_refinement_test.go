@@ -45,6 +45,7 @@ func TestTraceAndSessionTypedContentCoveragePreservesIncompleteDecline(t *testin
 			mock.ExpectBegin()
 			if kind == "trace" {
 				expectProjectionMaintenance(mock, true, false)
+				expectProjectionSummaryCapability(mock)
 			}
 			mock.ExpectQuery("SELECT complete FROM").WillReturnRows(sqlmock.NewRows([]string{"complete"}).AddRow(true))
 			expectContentCapability(mock, true)
@@ -76,6 +77,7 @@ func TestTraceTokenMinimumDeclinesMissingGeneratedCapabilityBeforeCount(t *testi
 	store := &oceanBaseStore{db: db, cfg: config{TablePrefix: "test"}}
 	mock.ExpectBegin()
 	expectProjectionMaintenance(mock, true, false)
+	expectProjectionSummaryCapability(mock)
 	mock.ExpectQuery("SELECT COLUMN_NAME,COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION").WillReturnRows(sqlmock.NewRows([]string{"COLUMN_NAME", "COLUMN_TYPE", "EXTRA", "GENERATION_EXPRESSION"}))
 	mock.ExpectRollback()
 	p := sessionReadModelTestParams().nativeListParams
@@ -94,12 +96,14 @@ func TestTraceTokenMinimumUsesVerifiedColumnsForPageAndFilteredCount(t *testing.
 	store := &oceanBaseStore{db: db, cfg: config{TablePrefix: "test"}}
 	mock.ExpectBegin()
 	expectProjectionMaintenance(mock, true, false)
+	expectProjectionSummaryCapability(mock)
 	mock.ExpectQuery("SELECT COLUMN_NAME,COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION").WillReturnRows(generatedCapabilityRows("decimal(65,0)", "STORED GENERATED", sessionTokenGeneratedValueExpr, "tinyint", "STORED GENERATED", sessionTokenGeneratedBillableExpr))
 	mock.ExpectQuery("SELECT complete FROM").WillReturnRows(sqlmock.NewRows([]string{"complete"}).AddRow(true))
 	mock.ExpectQuery("SELECT COALESCE").WillReturnRows(sqlmock.NewRows([]string{"stale", "boundary", "content"}).AddRow(0, 0, 0))
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM .*p.session_trace_tokens_v1>=\?`).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM`).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
-	mock.ExpectQuery(`SELECT JSON_OBJECT.*p.session_trace_tokens_v1>=\?.*LIMIT \? OFFSET \?`).WillReturnRows(sqlmock.NewRows([]string{"row_json", "preview_json", "source_revision"}))
+	mock.ExpectQuery(`SELECT COALESCE\(SUM\(selected_bytes`).WillReturnRows(sqlmock.NewRows([]string{"bytes"}).AddRow(0))
+	mock.ExpectQuery(`SELECT p.metadata_json_v1.*p.session_trace_tokens_v1>=\?.*LIMIT \? OFFSET \?`).WillReturnRows(sqlmock.NewRows([]string{"row_json", "preview_json", "source_revision"}))
 	for range 4 {
 		mock.ExpectQuery("SELECT").WillReturnRows(sqlmock.NewRows([]string{"value", "count"}))
 	}
@@ -121,6 +125,7 @@ func TestContentCoverageInspectionFailureIsNotAnEmptyPage(t *testing.T) {
 	store := &oceanBaseStore{db: db, cfg: config{TablePrefix: "test"}}
 	mock.ExpectBegin()
 	expectProjectionMaintenance(mock, true, false)
+	expectProjectionSummaryCapability(mock)
 	mock.ExpectQuery("SELECT complete FROM").WillReturnRows(sqlmock.NewRows([]string{"complete"}).AddRow(true))
 	mock.ExpectQuery("SELECT COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION").WillReturnError(sql.ErrConnDone)
 	mock.ExpectRollback()

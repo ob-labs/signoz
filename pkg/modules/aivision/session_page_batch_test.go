@@ -57,10 +57,10 @@ func sessionPageBatchResult(t *testing.T, flag string, batch bool) map[string]an
 	p.Username, p.Keyword, p.SearchType = " user ", " needle ", "input"
 	groups := sqlmock.NewRows([]string{"session_id", "trace_count", "last_activity"}).AddRow(" s ", 2, 150).AddRow("s", 1, 140).AddRow("S", 1, 130)
 	sessionPageBatchExpectPage(mock, groups, 3, true)
-	mock.ExpectQuery(`SELECT p\.session_id,COUNT\(\*\) AS trace_count,COALESCE\(SUM\(OCTET_LENGTH\(JSON_REMOVE`).WithArgs(sessionPageBatchScopeArgs(" s ", "s", "S")...).WillReturnRows(sqlmock.NewRows([]string{"session_id", "trace_count", "selected_bytes"}).AddRow("S", 1, 300).AddRow("s", 1, 300).AddRow(" s ", 2, 600))
+	mock.ExpectQuery(`SELECT p\.session_id,COUNT\(\*\) AS trace_count,COALESCE\(SUM\(OCTET_LENGTH\(p\.content_json_v1`).WithArgs(sessionPageBatchScopeArgs(" s ", "s", "S")...).WillReturnRows(sqlmock.NewRows([]string{"session_id", "trace_count", "selected_bytes"}).AddRow("S", 1, 300).AddRow("s", 1, 300).AddRow(" s ", 2, 600))
 	args := append([]driver.Value{" user ", " needle "}, sessionPageBatchScopeArgs(" s ", "s", "S")...)
 	args = append(args, sessionPageTraceLimit+1)
-	mock.ExpectQuery(`SELECT p\.session_id AS session_id,p\.trace_id AS trace_id,JSON_REMOVE`).WithArgs(args...).WillReturnRows(sessionPageBatchTraceRows(true, []string{" s ", " s ", "S", "s"}, []string{"01", "02", "04", "03"}))
+	mock.ExpectQuery(`SELECT p\.session_id AS session_id,p\.trace_id AS trace_id,p\.content_json_v1`).WithArgs(args...).WillReturnRows(sessionPageBatchTraceRows(true, []string{" s ", " s ", "S", "s"}, []string{"01", "02", "04", "03"}))
 	sessionPageBatchExpectFacets(mock)
 	mock.ExpectCommit()
 	result, err := s.sessionReadModelPage(context.Background(), "org", p)
@@ -84,6 +84,7 @@ func sessionPageBatchStore(t *testing.T, flag string) (*oceanBaseStore, sqlmock.
 func sessionPageBatchExpectPage(mock sqlmock.Sqlmock, groups *sqlmock.Rows, total int, content ...bool) {
 	mock.ExpectBegin()
 	expectProjectionMaintenance(mock, true, false)
+	expectProjectionSummaryCapability(mock)
 	mock.ExpectQuery("SELECT complete FROM").WithArgs("org", "space").WillReturnRows(sqlmock.NewRows([]string{"complete"}).AddRow(true))
 	if len(content) > 0 && content[0] {
 		expectContentCapability(mock, false)

@@ -307,6 +307,53 @@ func TestOceanBaseNativeTracePage(t *testing.T) {
 			require.Nil(t, data["meta"], "unsupported queries must not claim complete results")
 		}
 	})
+
+	t.Run("safe_large_page_uses_encoded_size_bound", func(t *testing.T) {
+		// Two ordinary 3 MiB inputs fit the 24 MiB page contract. A blanket
+		// six-times source multiplier rejects them despite minimal escaping.
+		scope := "large-safe-page"
+		first, _ := fixture.pair(scope, 7001)
+		second, _ := fixture.pair(scope, 7002)
+		body := strings.Repeat("x", 3*1024*1024)
+		first.attributes["gen_ai.input.messages"] = body
+		second.attributes["gen_ai.input.messages"] = body
+		fixture.insert(t, []tracePageIntegrationSpan{first, second})
+		result := query(t, scope, nil)
+		require.EqualValues(t, 2, result["meta"].(map[string]any)["totalItems"])
+		items := tracePageIntegrationItems(t, result)
+		require.Len(t, items, 2)
+		for _, item := range items {
+			spans := item["spans"].([]any)
+			require.Len(t, spans, 1)
+			attributes := spans[0].(map[string]any)["attributes"].(map[string]any)
+			require.Equal(t, body, attributes["gen_ai.input.messages"])
+		}
+		require.Less(t, len(lastWire), 24*1024*1024)
+	})
+
+	t.Run("stored_wire_bound_covers_escaping_and_updates", func(t *testing.T) {
+		scope := "wire-escaping"
+		span, _ := fixture.pair(scope, 7101)
+		fixture.insert(t, []tracePageIntegrationSpan{span})
+		for _, value := range []string{
+			strings.Repeat("plain", 8192),
+			strings.Repeat("\x00\x01\b\f\n\r\t\\\"", 8192),
+			strings.Repeat("中文😀<>&\u2028\u2029", 8192),
+		} {
+			var buf bytes.Buffer
+			encoder := json.NewEncoder(&buf)
+			encoder.SetEscapeHTML(false)
+			require.NoError(t, encoder.Encode(map[string]any{"text": value, "null": nil, "integer": int64(9223372036854775807)}))
+			_, err := db.Exec("UPDATE "+table+" SET span_name=?,status_message=?,attributes=? WHERE trace_id=?", string([]rune(value)[:100]), string([]rune(value)[:10000]), strings.TrimSpace(buf.String()), span.traceID)
+			require.NoError(t, err)
+			var bound, sqlBytes int64
+			require.NoError(t, db.QueryRow("SELECT page_wire_bytes_v1,OCTET_LENGTH("+tracePageSpanJSON()+") FROM "+table+" b WHERE trace_id=?", span.traceID).Scan(&bound, &sqlBytes))
+			require.GreaterOrEqual(t, bound, sqlBytes, "stored bound must cover database JSON encoding")
+			result := query(t, scope, nil)
+			require.EqualValues(t, 1, result["meta"].(map[string]any)["totalItems"])
+			require.GreaterOrEqual(t, bound+4096, int64(len(lastWire)), "stored bound must cover Go HTML escaping too")
+		}
+	})
 }
 
 type tracePageIntegrationStore struct {

@@ -350,6 +350,12 @@ func TestOceanBaseTraceReadModel(t *testing.T) {
 	require.NoError(t, ingest.ResumeProjectionMaintenance(ctx, db, prefix))
 	page, err = store.readModelPage(ctx, org, params)
 	require.NoError(t, err)
+	require.Equal(t, readModelUnsupported("projection_summary_columns_unavailable"), page)
+	// A direct maintenance caller also completes the additive helper migration;
+	// the public resume route/provider perform this initialization automatically.
+	require.NoError(t, ingest.InitializeTraceProjectionSummaries(ctx, db, prefix))
+	page, err = store.readModelPage(ctx, org, params)
+	require.NoError(t, err)
 	require.Equal(t, readModelUnsupported("historical_coverage_incomplete"), page)
 
 }

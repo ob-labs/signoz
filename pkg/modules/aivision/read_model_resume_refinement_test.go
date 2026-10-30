@@ -36,6 +36,9 @@ func TestProjectionResumeInitializesStatisticsBeforeOptionalContentFailure(t *te
 	mock.ExpectQuery("SELECT COUNT.*information_schema.COLUMNS").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(31))
 	mock.ExpectQuery("SELECT COUNT.*information_schema.STATISTICS").WillReturnRows(sqlmock.NewRows([]string{"primary", "matching"}).AddRow(7, 7))
 	mock.ExpectQuery("SELECT COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION").WithArgs("test_trace_projections", ingest.TraceContentCompleteColumn).WillReturnRows(sqlmock.NewRows([]string{"kind", "extra", "expression"}).AddRow("tinyint", "", "1"))
+	expectProjectionSummaryCapability(mock)
+	mock.ExpectQuery("SELECT COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION").WithArgs("test_trace_projections", ingest.TraceProjectionMetricsVersionColumn).WillReturnRows(sqlmock.NewRows([]string{"kind", "extra", "expression"}).AddRow("longtext", "STORED GENERATED", ingest.TraceProjectionMetricsVersionExpression))
+	mock.ExpectQuery("SELECT COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION").WithArgs("test_trace_projections", ingest.TraceProjectionOperationPreviewsColumn).WillReturnRows(sqlmock.NewRows([]string{"kind", "extra", "expression"}).AddRow("longtext", "STORED GENERATED", ingest.TraceProjectionOperationPreviewsExpression))
 	cfg := config{Enabled: true, QueryTimeout: time.Second, TablePrefix: "test"}
 	h := &handler{backend: &oceanBaseStore{db: db, cfg: cfg}, cfg: cfg, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/ai-vision/traces/read-model/maintenance/resume", nil)

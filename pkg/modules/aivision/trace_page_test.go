@@ -301,7 +301,7 @@ func TestTracePageHandlerPreservesExactFiltersAndClaimsAtStorageBoundary(t *test
 	h.backend.db = db
 	h.backend.cfg.TablePrefix = "test"
 	mock.ExpectBegin()
-	for _, col := range [][3]string{{ingest.TracePageDimensionsColumn, "longtext", ingest.TracePageDimensionsExpression}, {ingest.TracePageSourceBytesColumn, "bigint", ingest.TracePageSourceBytesExpression}} {
+	for _, col := range [][3]string{{ingest.TracePageDimensionsColumn, "longtext", ingest.TracePageDimensionsExpression}, {ingest.TracePageSourceBytesColumn, "bigint", ingest.TracePageSourceBytesExpression}, {ingest.TracePageWireBytesColumn, "bigint", ingest.TracePageWireBytesExpression}} {
 		mock.ExpectQuery("SELECT COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION").WithArgs("test_traces", col[0]).WillReturnRows(sqlmock.NewRows([]string{"type", "extra", "expression"}).AddRow(col[1], "STORED GENERATED", col[2]))
 	}
 	mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"count", "bytes", "max"}).AddRow(0, 0, 0))

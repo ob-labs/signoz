@@ -77,6 +77,7 @@ func TestPageRequiresCompleteHistoricalCoverageBeforeEmptySuccess(t *testing.T) 
 	s := &oceanBaseStore{db: db, cfg: config{TablePrefix: "test"}}
 	mock.ExpectBegin()
 	expectProjectionMaintenance(mock, true, false)
+	expectProjectionSummaryCapability(mock)
 	mock.ExpectQuery("SELECT complete FROM").WithArgs("org", "s").WillReturnRows(sqlmock.NewRows([]string{"complete"}))
 	mock.ExpectRollback()
 	p := nativeListParams{ProjectionContext: strings.Repeat("a", 64), SpaceID: "s", AgentUUID: "agent", From: 1, To: 2, Page: 1, Limit: 10}
@@ -97,6 +98,7 @@ func TestPageRejectsStaleAndBoundarySources(t *testing.T) {
 			s := &oceanBaseStore{db: db, cfg: config{TablePrefix: "test"}}
 			mock.ExpectBegin()
 			expectProjectionMaintenance(mock, true, false)
+			expectProjectionSummaryCapability(mock)
 			mock.ExpectQuery("SELECT complete FROM").WithArgs("org", "s").WillReturnRows(sqlmock.NewRows([]string{"complete"}).AddRow(true))
 			expectContentCapability(mock, false)
 			mock.ExpectQuery("SELECT COALESCE\\(SUM").WillReturnRows(sqlmock.NewRows([]string{"stale", "boundary", "incomplete_content"}).AddRow(tc.stale, tc.boundary, 0))

@@ -70,6 +70,7 @@ func TestMetricsWindowKeepsFactsAndDropsContentBeforeWireBudget(t *testing.T) {
 		mock.ExpectBegin()
 		expectProjectionMaintenance(mock, true, false)
 		mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"traces", "spans", "bytes", "max_bytes"}).AddRow(2, 2, 6000, 3000))
+		mock.ExpectQuery(`SELECT COALESCE\(MAX\(OCTET_LENGTH\(p.row_json\)\),0\) FROM`).WillReturnRows(sqlmock.NewRows([]string{"max_projection_bytes"}).AddRow(16384))
 		mock.ExpectQuery("SELECT r.trace_id,r.span_count,p.agent_uuid,").WillReturnRows(sqlmock.NewRows([]string{"trace_id", "span_count", "agent_uuid", "row_json", "source_revision"}).
 			AddRow("abc", 1, "agent", `{"trace_id":"abc","name":"null is preserved","userId":null,"span_count":1,"usage":{"total":9007199254740993},"_metrics":{"version":"native-trace-metrics-v1","observations":[]},"attributes.gen_ai.input.messages":"`+strings.Repeat("x", 8192)+`","ioPreview":{"input":"old content"},"arbitrary.payload":"not metrics"}`, 3))
 		mock.ExpectQuery("SELECT trace_id,.*NOT EXISTS").WillReturnRows(addWindowSpan(windowSpanRows(), "def"))
@@ -126,6 +127,7 @@ func TestMetricsWindowBudgetsOnlyCompactFactsAndStillBoundsRawFallback(t *testin
 			mock.ExpectBegin()
 			expectProjectionMaintenance(mock, true, false)
 			mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"traces", "spans", "bytes", "max_bytes"}).AddRow(1, 1, 12000, 12000))
+			mock.ExpectQuery(`SELECT COALESCE\(MAX\(OCTET_LENGTH\(p.row_json\)\),0\) FROM`).WillReturnRows(sqlmock.NewRows([]string{"max_projection_bytes"}).AddRow(16384))
 			row, err := json.Marshal(map[string]any{"trace_id": "abc", "usage": map[string]any{"total": json.Number("9007199254740993")}, tc.largeField: strings.Repeat("x", 8192)})
 			require.NoError(t, err)
 			mock.ExpectQuery("SELECT r.trace_id,r.span_count,p.agent_uuid,").WillReturnRows(sqlmock.NewRows([]string{"trace_id", "span_count", "agent_uuid", "row_json", "source_revision"}).AddRow("abc", 1, "agent", string(row), 3))
@@ -159,6 +161,56 @@ func TestMetricsWindowBudgetsOnlyCompactFactsAndStillBoundsRawFallback(t *testin
 					require.NotContains(t, compact, "attributes.gen_ai.input.messages")
 				}
 			}
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
+func TestMetricsWindowHugeHistoricalProjectionFallsBackBeforeDecode(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	store := &oceanBaseStore{db: db, cfg: config{TablePrefix: "test"}}
+	mock.ExpectBegin()
+	expectProjectionMaintenance(mock, true, false)
+	mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"traces", "spans", "bytes", "max_bytes"}).AddRow(1, 1, 3000, 3000))
+	mock.ExpectQuery(`SELECT COALESCE\(MAX\(OCTET_LENGTH\(p.row_json\)\),0\) FROM`).WillReturnRows(sqlmock.NewRows([]string{"max_projection_bytes"}).AddRow(sourcePageTraceByteLimit + 1))
+	// No canonical row is fetched, parsed or compacted before the raw retry.
+	mock.ExpectQuery("SELECT trace_id,").WillReturnRows(addWindowSpan(windowSpanRows(), "abc"))
+	mock.ExpectCommit()
+	result, err := store.traceWindowRepresentation(context.Background(), "org", windowTestParams(), false, traceWindowPayloadLimit, true)
+	require.NoError(t, err)
+	page := result.(map[string]any)
+	require.Empty(t, page["rows"])
+	require.Len(t, page["raw"], 1)
+	require.Equal(t, true, page["meta"].(map[string]any)["raw"])
+	require.Equal(t, "canonical_summary_budget", page["meta"].(map[string]any)["recoveryReason"])
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestMetricsWindowSourcePreflightPreservesMissingAndNullMetrics(t *testing.T) {
+	for _, tc := range []struct {
+		name, document string
+		present        bool
+	}{{"missing", `{"trace_id":"abc"}`, false}, {"explicit_null", `{"trace_id":"abc","_metrics":null}`, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			defer db.Close()
+			store := &oceanBaseStore{db: db, cfg: config{TablePrefix: "test"}}
+			mock.ExpectBegin()
+			expectProjectionMaintenance(mock, true, false)
+			mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"traces", "spans", "bytes", "max_bytes"}).AddRow(1, 1, 3000, 3000))
+			mock.ExpectQuery(`SELECT COALESCE\(MAX\(OCTET_LENGTH\(p.row_json\)\),0\) FROM`).WillReturnRows(sqlmock.NewRows([]string{"max_projection_bytes"}).AddRow(len(tc.document)))
+			mock.ExpectQuery("SELECT r.trace_id,r.span_count,p.agent_uuid,").WillReturnRows(sqlmock.NewRows([]string{"trace_id", "span_count", "agent_uuid", "row_json", "source_revision"}).AddRow("abc", 1, "agent", tc.document, 3))
+			mock.ExpectQuery("SELECT trace_id,.*NOT EXISTS").WillReturnRows(windowSpanRows())
+			mock.ExpectCommit()
+			result, err := store.traceWindowRepresentation(context.Background(), "org", windowTestParams(), false, traceWindowPayloadLimit, true)
+			require.NoError(t, err)
+			row := result.(map[string]any)["rows"].([]map[string]any)[0]
+			value, present := row["_metrics"]
+			require.Equal(t, tc.present, present)
+			require.Nil(t, value)
 			require.NoError(t, mock.ExpectationsWereMet())
 		})
 	}

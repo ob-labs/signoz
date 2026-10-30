@@ -32,7 +32,20 @@ func expectLifecycleBaseReady(mock sqlmock.Sqlmock, generation int64) {
 	mock.ExpectQuery("SELECT COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION").WithArgs("test_trace_projections", ingest.SessionTokenGeneratedBillableColumn).WillReturnRows(sqlmock.NewRows([]string{"kind", "extra", "expression"}).AddRow("tinyint(4)", "STORED GENERATED", ingest.SessionTokenGeneratedBillableExpr))
 }
 
+func expectLifecycleSummariesReady(mock sqlmock.Sqlmock) {
+	for phase := 0; phase < 2; phase++ {
+		columns := [][2]string{{ingest.TraceProjectionMetadataColumn, ingest.TraceProjectionMetadataExpression}, {ingest.TraceProjectionContentColumn, ingest.TraceProjectionContentExpression}}
+		if phase == 0 {
+			columns = append(columns, [2]string{ingest.TraceProjectionMetricsVersionColumn, ingest.TraceProjectionMetricsVersionExpression}, [2]string{ingest.TraceProjectionOperationPreviewsColumn, ingest.TraceProjectionOperationPreviewsExpression})
+		}
+		for _, column := range columns {
+			mock.ExpectQuery("SELECT COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION").WithArgs("test_trace_projections", column[0]).WillReturnRows(sqlmock.NewRows([]string{"kind", "extra", "expression"}).AddRow("longtext", "STORED GENERATED", column[1]))
+		}
+	}
+}
+
 func expectLifecycleContentReady(mock sqlmock.Sqlmock) {
+	expectLifecycleSummariesReady(mock)
 	mock.ExpectQuery("SELECT COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION").WithArgs("test_trace_projections", ingest.TraceContentCompleteColumn).WillReturnRows(sqlmock.NewRows([]string{"kind", "extra", "expression"}).AddRow("tinyint(4)", "STORED GENERATED", ingest.TraceContentCompleteExpression))
 }
 
@@ -46,6 +59,7 @@ func TestProjectionLifecycleContentFailureDoesNotBlockReadyStatistics(t *testing
 	// Full existing statistics type/receipt/primary-key proof is consumed
 	// before an unrelated optional content definition is found incompatible.
 	expectLifecycleStatisticsReady(mock, true)
+	expectLifecycleSummariesReady(mock)
 	mock.ExpectQuery("SELECT COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION").WithArgs("test_trace_projections", ingest.TraceContentCompleteColumn).WillReturnRows(sqlmock.NewRows([]string{"kind", "extra", "expression"}).AddRow("tinyint", "", "1"))
 	complete, err := initializeModelsForLifecycle(context.Background(), db)
 	require.ErrorContains(t, err, "incompatible optional content-completeness column")
@@ -111,6 +125,7 @@ func TestProjectionLifecycleSuspendedStartResumesAfterTransientDDLFailure(t *tes
 	mock.ExpectExec("CREATE TABLE IF NOT EXISTS .*trace_statistics").WillReturnError(errors.New("temporary DDL unavailability"))
 	mock.ExpectExec("SET SESSION ob_query_timeout=10000000").WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec("UPDATE .*SET migration_owner='',migration_until=0 WHERE").WithArgs(sqlmock.AnyArg(), int64(8)).WillReturnResult(sqlmock.NewResult(0, 1))
+	expectLifecycleSummariesReady(mock)
 	expectLifecycleBaseReady(mock, 8)
 	expectLifecycleVersion(mock)
 	expectLifecycleStatisticsReady(mock, true)
@@ -228,4 +243,19 @@ func TestProjectionLifecycleCloseCancelsActiveInitialization(t *testing.T) {
 	}
 	require.EqualValues(t, 1, attempts.Load())
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestProjectionLifecycleStatisticsFailureStillChecksSummaryReadiness(t *testing.T) {
+	t.Setenv("SIGNOZ_AIVISION_PROJECTION_MAINTENANCE_ENABLED", "true")
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	expectLifecycleBaseReady(mock, 7)
+	failure := errors.New("optional statistics inspection unavailable")
+	mock.ExpectQuery("SELECT VERSION").WillReturnError(failure)
+	expectLifecycleSummariesReady(mock)
+	complete, err := initializeModelsForLifecycle(context.Background(), db)
+	require.ErrorIs(t, err, failure)
+	require.False(t, complete, "statistics recovery remains pending after independent summary readiness")
+	require.NoError(t, mock.ExpectationsWereMet(), "an optional statistics failure must not skip summary initialization")
 }

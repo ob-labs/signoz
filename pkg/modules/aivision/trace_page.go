@@ -139,9 +139,10 @@ func (store *oceanBaseStore) tracePage(ctx context.Context, org string, p native
 		return nil, fmt.Errorf("%w: metadata window exceeds 200000 spans, 16 MiB metadata or 64 KiB per span; narrow the time range", errTracePageBudget)
 	}
 	// The exact page relation is reused for preflight, before JSON aggregation.
-	// Six is the maximum JSON escaping expansion for an arbitrary UTF-8 byte.
+	// Span bounds were encoded on write; only small facet values use the
+	// conservative escaping multiplier here. No raw body is parsed by preflight.
 	common := strings.Split(query, "\nSELECT CAST(JSON_ARRAYAGG")[0]
-	preflight := common + " SELECT COALESCE((SELECT SUM(source_bytes*6+512) FROM base b JOIN page p ON BINARY b.trace_id=BINARY p.trace_id),0)+COALESCE((SELECT SUM(OCTET_LENGTH(value)*6+256) FROM facet_counts),0)+4096"
+	preflight := common + " SELECT COALESCE((SELECT SUM(wire_bytes) FROM base b JOIN page p ON BINARY b.trace_id=BINARY p.trace_id),0)+COALESCE((SELECT SUM(OCTET_LENGTH(value)*6+256) FROM facet_counts),0)+4096"
 	var wireBound int64
 	if err = tx.QueryRowContext(ctx, preflight, args[:len(args)-len(scopeArgs)-2]...).Scan(&wireBound); err != nil {
 		return nil, err
@@ -625,7 +626,7 @@ func buildTracePageSQL(table, org string, p nativeListParams, maxSpanCount int) 
 	// them once per statement instead of repeating the metadata scan/extraction.
 	// Metadata preflight bounds its input; raw Span JSON stays outside the CTE.
 	query := `WITH base AS (
-SELECT /*+ MATERIALIZE */ t.trace_id,t.span_id,t.start_time_unix_nano,t.end_time_unix_nano,t.status_code,` + ingest.TracePageSourceBytesColumn + ` AS source_bytes,
+SELECT /*+ MATERIALIZE */ t.trace_id,t.span_id,t.start_time_unix_nano,t.end_time_unix_nano,t.status_code,` + ingest.TracePageWireBytesColumn + ` AS wire_bytes,
 ` + compact("space") + ` AS scope_space,` + pageText(compact("agent")) + ` AS scope_agent,
 ` + compact("env") + ` AS env_json,` + compact("scene") + ` AS scene_json,
 ` + compact("resource_username") + ` AS resource_username,` + compact("attribute_username") + ` AS attribute_username,

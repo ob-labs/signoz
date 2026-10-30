@@ -19,7 +19,7 @@ func projectionIncompleteContentSQL(required bool, generated ...bool) string {
 	if len(generated) > 0 && generated[0] {
 		return "COALESCE(SUM(CASE WHEN BINARY p.agent_uuid=BINARY ? AND p." + ingest.TraceContentCompleteColumn + "=0 THEN 1 ELSE 0 END),0)"
 	}
-	return "COALESCE(SUM(CASE WHEN BINARY p.agent_uuid=BINARY ? AND BINARY COALESCE(JSON_UNQUOTE(JSON_EXTRACT(p.row_json,'$._contentComplete')),'true')=BINARY 'false' THEN 1 ELSE 0 END),0)"
+	return "COALESCE(SUM(CASE WHEN BINARY p.agent_uuid=BINARY ? AND BINARY COALESCE(JSON_UNQUOTE(JSON_EXTRACT(p.metadata_json_v1,'$._contentComplete')),'true')=BINARY 'false' THEN 1 ELSE 0 END),0)"
 }
 
 func (s *oceanBaseStore) contentCoverageCapability(ctx context.Context, tx *sql.Tx, required bool) (bool, string, error) {

@@ -164,6 +164,23 @@ func (s *oceanBaseStore) traceWindowRepresentation(ctx context.Context, org stri
 		recoveryReason = "canonical_summary_budget"
 	}
 	candidate := "SELECT trace_id,COUNT(*) AS span_count FROM " + s.tracesTable() + " WHERE " + scope + " GROUP BY BINARY trace_id,trace_id"
+	if useProjection && metricsOnly {
+		// Compact metrics may be small even when full canonical IO is large.
+		// Bound one historical/direct-writer row before decoding, not the sum
+		// of IO across the window. Ordinary publications are limited to 16 MiB.
+		var maximumProjectionBytes int64
+		query := "SELECT COALESCE(MAX(OCTET_LENGTH(p.row_json)),0) FROM (" + candidate + ") r JOIN " + cleanRelation
+		values := append(append([]any{}, args...), cleanArgs...)
+		if err := tx.QueryRowContext(ctx, query, values...).Scan(&maximumProjectionBytes); err != nil {
+			return nil, err
+		}
+		if maximumProjectionBytes < 0 {
+			return nil, fmt.Errorf("invalid canonical recovery row byte count")
+		}
+		if maximumProjectionBytes > sourcePageTraceByteLimit {
+			resetToRaw()
+		}
+	}
 	if useProjection && !metricsOnly {
 		// Canonical rows duplicate IO and may exceed the compact raw form. This
 		// conservative estimate avoids loading a known-large representation.

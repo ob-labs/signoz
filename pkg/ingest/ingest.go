@@ -125,6 +125,9 @@ func AddToRouter(router *mux.Router, cfg Config, logger *slog.Logger) error {
 	if err := initializeProjectionMaintenance(initCtx, db, cfg); err != nil {
 		logger.Warn("projection maintenance unavailable; raw ingestion retained with shared eligibility fence", "error", err)
 	}
+	if err := InitializeTraceProjectionSummaries(initCtx, db, cfg.TablePrefix); err != nil {
+		logger.Warn("projection summaries unavailable; ingestion retained", "error", err)
+	}
 	initCancel()
 	ep := &endpoint{
 		cfg:          cfg,
@@ -212,9 +215,7 @@ func (ep *endpoint) handleTraces(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := ep.insertRows(r.Context(), ep.tracesTable, spanInsertColumns, spanUpsert, rows); err != nil {
 		ep.logger.Error("insert otlp traces", slog.String("err", err.Error()))
-		// 5xx on purpose: the gateway otlphttp exporter retries on it, so a
-		// transient store failure costs latency, not telemetry.
-		http.Error(w, "insert traces: "+err.Error(), http.StatusInternalServerError)
+		writeStorageError(w, "insert traces", err)
 		return
 	}
 	writeOTLPResponse(w, isJSON)
@@ -250,7 +251,7 @@ func (ep *endpoint) handleLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := ep.insertRows(r.Context(), ep.logsTable, logInsertColumns, logUpsert, rows); err != nil {
 		ep.logger.Error("insert otlp logs", slog.String("err", err.Error()))
-		http.Error(w, "insert logs: "+err.Error(), http.StatusInternalServerError)
+		writeStorageError(w, "insert logs", err)
 		return
 	}
 	writeOTLPResponse(w, isJSON)
