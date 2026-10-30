@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SigNoz/signoz/pkg/ingest"
 	"github.com/SigNoz/signoz/pkg/instrumentation/instrumentationtest"
 	"github.com/SigNoz/signoz/pkg/telemetrystore"
 	"github.com/SigNoz/signoz/pkg/telemetrystore/oceanbasetelemetrystore"
@@ -55,8 +56,8 @@ func TestOceanBaseNativeTracePage(t *testing.T) {
 	backend, err := oceanbasetelemetrystore.New(ctx, settings, cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, backend.(interface{ Close() error }).Close()) })
-	counter := &tracePageIntegrationStore{TelemetryStore: backend}
-	h := NewHandler(NewModule(settings, counter, nil, cfg))
+	require.NoError(t, ingest.InitializeTracePageDimensions(ctx, db, prefix))
+	h := NewHandler(NewModule(settings, backend, nil, cfg))
 	var lastWire string
 	fixture := tracePageIntegrationFixture{
 		db: db, table: table, org: valuer.GenerateUUID().StringValue(),
@@ -94,7 +95,6 @@ func TestOceanBaseNativeTracePage(t *testing.T) {
 			seen := map[string]bool{}
 			const limit = 20
 			for page := 1; page <= (count+limit-1)/limit; page++ {
-				beforeQueries, beforeRows := counter.queries, counter.rows
 				result := query(t, scope, url.Values{"page": {strconv.Itoa(page)}, "limit": {"20"}})
 				meta := result["meta"].(map[string]any)
 				require.EqualValues(t, count, meta["totalItems"])
@@ -108,8 +108,7 @@ func TestOceanBaseNativeTracePage(t *testing.T) {
 					require.EqualValues(t, 2, item["spanCount"])
 					require.Len(t, item["spans"], 2, "page must carry complete traces")
 				}
-				require.Equal(t, 1, counter.queries-beforeQueries, "page, count, facets and spans share one storage snapshot")
-				require.LessOrEqual(t, counter.rows-beforeRows, 3*limit+16, "only current-page spans and bounded aggregates may leave storage")
+				require.Less(t, len(lastWire), 24*1024*1024, "wire response must fit the checked page budget")
 				require.Equal(t, map[string]int{"prod": count, "test": count}, tracePageIntegrationFacet(t, result, "env"))
 				require.Equal(t, map[string]int{"coding": count}, tracePageIntegrationFacet(t, result, "scene"))
 				if page <= 2 {
@@ -215,7 +214,7 @@ func TestOceanBaseNativeTracePage(t *testing.T) {
 		fixture.insert(t, []tracePageIntegrationSpan{firstRoot, firstChild, secondRoot, secondChild})
 		limited := cfg
 		limited.OceanBase.MaxResultRows = 2
-		handler := NewHandler(NewModule(settings, counter, nil, limited))
+		handler := NewHandler(NewModule(settings, backend, nil, limited))
 		status, payload := fixture.call(t, handler.TracePage, scope, nil)
 		require.Equal(t, http.StatusOK, status, payload)
 		result := payload["data"].(map[string]any)

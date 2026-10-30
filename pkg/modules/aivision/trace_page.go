@@ -2,8 +2,11 @@ package aivision
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/SigNoz/signoz/pkg/ingest"
 	"io"
 	"math"
 	"net/http"
@@ -14,9 +17,8 @@ import (
 
 const nativeTracePageContract = "native-trace-page-v1"
 
-// This endpoint selects trace IDs, counts, facets and page spans in one SQL
-// statement. Ingestion between separate count/detail queries cannot produce a
-// page which claims completeness while omitting newly arrived spans.
+// Resource preflight and page data share a repeatable-read snapshot. Metadata
+// is stored separately from raw payloads; only current-page spans are loaded.
 func (h *handler) TracePage(w http.ResponseWriter, r *http.Request) {
 	org, ok := h.organization(w, r)
 	if !ok {
@@ -72,10 +74,18 @@ func (h *handler) TracePage(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, "bad_data", "limit must be between 1 and 200 and agent_uuid at most 255 characters")
 		return
 	}
+	if !acquireTraceQuery(w) {
+		return
+	}
+	defer releaseTraceQuery()
 	ctx, cancel := context.WithTimeout(r.Context(), h.cfg.QueryTimeout)
 	defer cancel()
 	result, err := h.backend.tracePage(ctx, org, p)
 	if err != nil {
+		if errors.Is(err, errTracePageBudget) {
+			writeTraceCapacityError(w, http.StatusRequestEntityTooLarge, err.Error())
+			return
+		}
 		h.writeBackendError(w, err)
 		return
 	}
@@ -100,8 +110,50 @@ func (store *oceanBaseStore) tracePage(ctx context.Context, org string, p native
 	if err != nil {
 		return nil, err
 	}
-	rows, err := store.queryRows(ctx, query, args...)
+	if store.db == nil {
+		return nil, fmt.Errorf("trace page requires a snapshot-capable database")
+	}
+	tx, err := store.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	ready, err := ingest.TracePageDimensionsReady(ctx, tx, store.cfg.TablePrefix)
+	if err != nil {
+		return nil, err
+	}
+	if !ready {
+		return nil, fmt.Errorf("trace page requires completed metadata migration")
+	}
+	physical := nativeListParams{From: p.From, To: p.To, User: p.User, SpaceID: p.SpaceID, AgentProduct: p.AgentProduct}
+	scope, scopeArgs, err := nativeTraceWhere(org, physical)
+	if err != nil {
+		return nil, err
+	}
+	var count, total, maximum int64
+	sizeSQL := "SELECT COUNT(*),COALESCE(SUM(OCTET_LENGTH(" + ingest.TracePageDimensionsColumn + ")),0),COALESCE(MAX(OCTET_LENGTH(" + ingest.TracePageDimensionsColumn + ")),0) FROM " + store.tracesTable() + " WHERE " + scope
+	if err = tx.QueryRowContext(ctx, sizeSQL, scopeArgs...).Scan(&count, &total, &maximum); err != nil {
+		return nil, err
+	}
+	if count > 200000 || total > 16*1024*1024 || maximum > 64*1024 {
+		return nil, fmt.Errorf("%w: metadata window exceeds 200000 spans, 16 MiB metadata or 64 KiB per span; narrow the time range", errTracePageBudget)
+	}
+	// The exact page relation is reused for preflight, before JSON aggregation.
+	// Six is the maximum JSON escaping expansion for an arbitrary UTF-8 byte.
+	common := strings.Split(query, "\nSELECT CAST(JSON_ARRAYAGG")[0]
+	preflight := common + " SELECT COALESCE((SELECT SUM(source_bytes*6+512) FROM base b JOIN page p ON BINARY b.trace_id=BINARY p.trace_id),0)+COALESCE((SELECT SUM(OCTET_LENGTH(value)*6+256) FROM facet_counts),0)+4096"
+	var wireBound int64
+	if err = tx.QueryRowContext(ctx, preflight, args[:len(args)-len(scopeArgs)-2]...).Scan(&wireBound); err != nil {
+		return nil, err
+	}
+	if wireBound > 24*1024*1024 {
+		return nil, fmt.Errorf("%w: page and facets exceed 24 MiB encoded budget; reduce page size or narrow the time range", errTracePageBudget)
+	}
+	rows, err := scanReadModelRows(ctx, tx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(); err != nil {
 		return nil, err
 	}
 	if len(rows) != 1 {
@@ -565,23 +617,18 @@ func buildTracePageSQL(table, org string, p nativeListParams, maxSpanCount int) 
 		conditions = append(conditions, "EXISTS (SELECT 1 FROM dimension_values tag_filter WHERE BINARY tag_filter.trace_id=BINARY s.trace_id AND tag_filter.dimension='tags' AND "+clause+")")
 		filterArgs = append(filterArgs, values...)
 	}
-	resource := func(key string) string { return pageJSONKey("resource_attributes", key) }
+	compact := func(key string) string { return pageJSONKey(ingest.TracePageDimensionsColumn, key) }
 	validString := func(expr string) string {
 		return "(" + expr + " IS NULL OR JSON_TYPE(" + expr + ") IN ('NULL','STRING'))"
 	}
-	tag := pageAttribute("langfuse.trace.tags")
-	// Do not use JSON_MERGE_PATCH for attributes: an explicit null overrides a
-	// payload attribute and must remain present (especially for tag clearing).
-	// Keep the reused JSON_TABLE/dimension/matching CTEs materialized. Without
-	// these hints OceanBase's CTE rewriting can drop tag facets when another
-	// consumer filters tags; the real-store differential test covers this case.
 	query := `WITH base AS (
-SELECT t.*, ` + resource("aivision.space.id") + ` AS scope_space, ` + pageText(resource("aivision.agent.id")) + ` AS scope_agent,
-` + resource("ant.agent.env") + ` AS env_json, ` + resource("ant.agent.scene") + ` AS scene_json,
-` + resource("ant.username") + ` AS resource_username, ` + pageAttribute("ant.username") + ` AS attribute_username,
-COALESCE(` + pageHasKey("resource_attributes", "ant.username") + `,0) AS has_resource_username,
-COALESCE(` + pageHasAttribute("ant.username") + `,0) AS has_attribute_username,
-` + tag + ` AS tags_json, COALESCE(` + pageHasAttribute("langfuse.trace.tags") + `,0) AS has_tags
+SELECT t.trace_id,t.span_id,t.start_time_unix_nano,t.end_time_unix_nano,t.status_code,` + ingest.TracePageSourceBytesColumn + ` AS source_bytes,
+` + compact("space") + ` AS scope_space,` + pageText(compact("agent")) + ` AS scope_agent,
+` + compact("env") + ` AS env_json,` + compact("scene") + ` AS scene_json,
+` + compact("resource_username") + ` AS resource_username,` + compact("attribute_username") + ` AS attribute_username,
+` + compact("has_resource_username") + ` AS has_resource_username,` + compact("has_attribute_username") + ` AS has_attribute_username,
+` + compact("has_env") + ` AS has_env,` + compact("has_scene") + ` AS has_scene,` + compact("has_agent") + ` AS has_agent,
+` + compact("tags") + ` AS tags_json,` + compact("has_tags") + ` AS has_tags
 FROM ` + table + ` t WHERE ` + where + `
 ), summaries AS (
 SELECT trace_id, MIN(start_time_unix_nano) AS start_ns, MAX(end_time_unix_nano) AS end_ns,
@@ -606,10 +653,10 @@ SELECT /*+ MATERIALIZE */ c.trace_id, j.tag_value AS value,
 CASE WHEN JSON_TYPE(JSON_EXTRACT(c.tags,CONCAT('$[',j.tag_ord-1,']')))='STRING' AND CHAR_LENGTH(JSON_UNQUOTE(JSON_EXTRACT(c.tags,CONCAT('$[',j.tag_ord-1,']'))))<=16384 THEN 0 ELSE 1 END AS unsupported_values
 FROM canonical_tags c, JSON_TABLE(c.tags, '$[*]' COLUMNS (tag_ord FOR ORDINALITY, tag_value VARCHAR(16384) PATH '$' NULL ON ERROR)) j
 ), dimension_values AS (
-SELECT /*+ MATERIALIZE */ trace_id,'env' AS dimension,` + pageText("env_json") + ` AS value FROM base WHERE ` + pageHasKey("resource_attributes", "ant.agent.env") + `
-UNION ALL SELECT trace_id,'scene',` + pageText("scene_json") + ` FROM base WHERE ` + pageHasKey("resource_attributes", "ant.agent.scene") + `
+SELECT /*+ MATERIALIZE */ trace_id,'env' AS dimension,` + pageText("env_json") + ` AS value FROM base WHERE has_env=1
+UNION ALL SELECT trace_id,'scene',` + pageText("scene_json") + ` FROM base WHERE has_scene=1
 UNION ALL SELECT b.trace_id,'username',CASE WHEN s.resource_username_count>0 THEN ` + pageText("resource_username") + ` ELSE ` + pageText("attribute_username") + ` END FROM base b JOIN summaries s ON BINARY b.trace_id=BINARY s.trace_id WHERE (s.resource_username_count>0 AND b.has_resource_username=1) OR (s.resource_username_count=0 AND b.has_attribute_username=1)
-UNION ALL SELECT trace_id,'agent_uuid',scope_agent FROM base WHERE ` + pageHasKey("resource_attributes", "aivision.agent.id") + `
+UNION ALL SELECT trace_id,'agent_uuid',scope_agent FROM base WHERE has_agent=1
 UNION ALL SELECT trace_id,'tags',value FROM tag_values
 ), matching AS (
 SELECT /*+ MATERIALIZE */ s.* FROM summaries s WHERE ` + strings.Join(conditions, " AND ") + `
@@ -622,11 +669,14 @@ SELECT CAST(JSON_ARRAYAGG(JSON_OBJECT('kind',kind,'result',result,'section',sect
 SELECT 0 AS section, 0 AS page_rank, '' AS trace_key, 0 AS span_start, '' AS span_key, 'meta' AS kind,
 JSON_OBJECT('totalItems',(SELECT COUNT(*) FROM matching),'invalidScope',COALESCE((SELECT SUM(invalid_scope) FROM summaries),0),'oversizedTraces',(SELECT COUNT(*) FROM page WHERE span_count > ?),'unsupportedValues',COALESCE((SELECT SUM(unsupported_values) FROM summaries),0)+COALESCE((SELECT SUM(unsupported_values) FROM canonical_tags),0)+COALESCE((SELECT SUM(unsupported_values) FROM tag_values),0)) AS result
 UNION ALL SELECT 1,0,'',0,'','facet',JSON_OBJECT('dimension',dimension,'values',JSON_ARRAYAGG(JSON_OBJECT('value',value,'count',trace_count))) FROM facet_counts GROUP BY dimension
-UNION ALL SELECT 2,p.page_rank,p.trace_id,0,'','trace',JSON_OBJECT('traceId',p.trace_id,'spanCount',p.span_count,'spans',JSON_ARRAYAGG(` + tracePageSpanJSON() + `)) FROM base b JOIN page p ON BINARY b.trace_id=BINARY p.trace_id WHERE p.span_count<=? GROUP BY p.page_rank,p.trace_id,p.span_count
+UNION ALL SELECT 2,p.page_rank,p.trace_id,0,'','trace',JSON_OBJECT('traceId',p.trace_id,'spanCount',p.span_count,'spans',JSON_ARRAYAGG(` + tracePageSpanJSON() + `)) FROM ` + table + ` b JOIN page p ON BINARY b.trace_id=BINARY p.trace_id WHERE ` + where + ` AND p.span_count<=? GROUP BY p.page_rank,p.trace_id,p.span_count
 ) page_result`
 	args = append(args, p.SpaceID, p.AgentUUID)
 	args = append(args, filterArgs...)
-	args = append(args, p.Limit, int64(p.Page-1)*int64(p.Limit), maxSpanCount, maxSpanCount)
+	args = append(args, p.Limit, int64(p.Page-1)*int64(p.Limit), maxSpanCount)
+	_, rawArgs, _ := nativeTraceWhere(org, physical)
+	args = append(args, rawArgs...)
+	args = append(args, maxSpanCount)
 	return query, args, nil
 }
 
@@ -643,4 +693,30 @@ func tracePageSpanJSON() string {
 		parts = append(parts, "'"+key+"'", expr)
 	}
 	return "JSON_OBJECT(" + strings.Join(parts, ",") + ")"
+}
+
+// Shared across native read endpoints, including raw recovery paths. Admission
+// stays held through serialization and response writing; replicas multiply it.
+var traceQuerySlots = make(chan struct{}, 2)
+
+func acquireTraceQuery(w http.ResponseWriter) bool {
+	select {
+	case traceQuerySlots <- struct{}{}:
+		return true
+	default:
+		writeTraceCapacityError(w, http.StatusTooManyRequests, "Trace query capacity is busy; retry shortly")
+		return false
+	}
+}
+func releaseTraceQuery() { <-traceQuerySlots }
+
+var errTracePageBudget = errors.New("trace page exceeds resource budget")
+
+func writeTraceCapacityError(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	if status == http.StatusTooManyRequests {
+		w.Header().Set("Retry-After", "1")
+	}
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{"status": "error", "error": message})
 }

@@ -200,6 +200,13 @@ func (h *handler) ReadModel(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, readModelUnsupported(reason))
 		return
 	}
+	switch action {
+	case "source-page", "page", "window", "metrics-window", "metrics-aggregate", "operation-page", "batch-snapshot", "sessions/page", "snapshot":
+		if !acquireTraceQuery(w) {
+			return
+		}
+		defer releaseTraceQuery()
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), readModelRequestTimeout(action, h.cfg.QueryTimeout))
 	defer cancel()
 	var result any

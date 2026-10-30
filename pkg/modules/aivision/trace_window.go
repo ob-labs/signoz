@@ -19,7 +19,7 @@ import (
 const traceWindowContract = "native-trace-window-v1"
 const traceWindowTraceLimit = 50000
 const traceWindowSpanLimit = 500000
-const traceWindowPayloadLimit = 256 * 1024 * 1024
+const traceWindowPayloadLimit = 24 * 1024 * 1024
 
 func (h *handler) traceWindowParams(r *http.Request) (nativeListParams, bool, error) {
 	allowed := map[string]bool{}

@@ -1,0 +1,538 @@
+{
+  "date": "2026-10-30",
+  "timezone": "Asia/Shanghai",
+  "measurement_kind": "Local synthetic direct-SQL comparison, not end-to-end API latency or P95",
+  "dataset": {
+    "traces": 5000,
+    "spans": 5000,
+    "window_days": 3,
+    "page_size": 50,
+    "nonpage_input_kib": 64,
+    "page_input_kib": 16,
+    "source_json_bytes": 652074800,
+    "stored_metadata_bytes": 1415000,
+    "response_bytes": 1689241
+  },
+  "engines": {
+    "seekdb": {
+      "version": "seekdb-v1.4.0.0",
+      "image": "oceanbase/seekdb@sha256:4db4961869d554313520d6081fca29265ba6da6db7313311bd8acbed771a956b5ad",
+      "cpu_quota": 2,
+      "container_memory_gib": 4,
+      "memory_budget": "2G",
+      "old_restart_c4": {
+        "variant": "old",
+        "nonpage_kib": 64,
+        "inventory": [
+          5000,
+          652074800,
+          1415000
+        ],
+        "concurrency": 4,
+        "before": {
+          "rss": 257040384,
+          "cgroup": 286412800
+        },
+        "after": {
+          "rss": 868540416,
+          "cgroup": 896245760
+        },
+        "peak": {
+          "rss": 1070301184,
+          "cgroup": 1098444800
+        },
+        "outcomes": [
+          {
+            "success": true,
+            "seconds": 3.273,
+            "bytes": 1689241,
+            "traces": 50
+          },
+          {
+            "success": true,
+            "seconds": 3.198,
+            "bytes": 1689241,
+            "traces": 50
+          },
+          {
+            "success": true,
+            "seconds": 3.28,
+            "bytes": 1689241,
+            "traces": 50
+          },
+          {
+            "success": true,
+            "seconds": 3.281,
+            "bytes": 1689241,
+            "traces": 50
+          }
+        ]
+      },
+      "fixed_restart_c4": {
+        "variant": "fixed",
+        "nonpage_kib": 64,
+        "inventory": [
+          5000,
+          652074800,
+          1415000
+        ],
+        "concurrency": 4,
+        "before": {
+          "rss": 248274944,
+          "cgroup": 310194176
+        },
+        "after": {
+          "rss": 629592064,
+          "cgroup": 689217536
+        },
+        "peak": {
+          "rss": 629592064,
+          "cgroup": 689451008
+        },
+        "outcomes": [
+          {
+            "success": true,
+            "seconds": 1.224,
+            "bytes": 1689241,
+            "traces": 50
+          },
+          {
+            "success": true,
+            "seconds": 1.243,
+            "bytes": 1689241,
+            "traces": 50
+          },
+          {
+            "success": true,
+            "seconds": 1.21,
+            "bytes": 1689241,
+            "traces": 50
+          },
+          {
+            "success": true,
+            "seconds": 1.204,
+            "bytes": 1689241,
+            "traces": 50
+          }
+        ]
+      }
+    },
+    "oceanbase_ce": {
+      "version": "OceanBase_CE-v4.4.2.1",
+      "image": "oceanbase/oceanbase-ce@sha256:eaa2c3b3513fa21e4a658f197c1deb93c9d6b6eb742cfa5ef0f085f82b9cec54",
+      "cpu_quota": 2,
+      "container_memory_gib": 8,
+      "memory_limit": "6G",
+      "system_memory": "1G",
+      "test_tenant_memory_gib": 3,
+      "storage": "isolated host temporary bind mount; 2 GiB data file, 4 GiB log allocation",
+      "old_restart_c4": {
+        "variant": "old",
+        "concurrency": 4,
+        "before": {
+          "rss": 2872909824,
+          "cgroup": 3054071808
+        },
+        "after": {
+          "rss": 3956666368,
+          "cgroup": 4133588992
+        },
+        "peak": {
+          "rss": 3956666368,
+          "cgroup": 4133588992
+        },
+        "outcomes": [
+          {
+            "success": true,
+            "seconds": 6.763,
+            "bytes": 1689241,
+            "traces": 50,
+            "total": 5000,
+            "wire_bound": null,
+            "canonical_sha256": "8f3de6d5a1f9c9204ec22d1d7af7a1d3b94da2ab05a0cc18c5828c35a702dd6d"
+          },
+          {
+            "success": true,
+            "seconds": 6.762,
+            "bytes": 1689241,
+            "traces": 50,
+            "total": 5000,
+            "wire_bound": null,
+            "canonical_sha256": "8f3de6d5a1f9c9204ec22d1d7af7a1d3b94da2ab05a0cc18c5828c35a702dd6d"
+          },
+          {
+            "success": true,
+            "seconds": 6.763,
+            "bytes": 1689241,
+            "traces": 50,
+            "total": 5000,
+            "wire_bound": null,
+            "canonical_sha256": "8f3de6d5a1f9c9204ec22d1d7af7a1d3b94da2ab05a0cc18c5828c35a702dd6d"
+          },
+          {
+            "success": true,
+            "seconds": 6.762,
+            "bytes": 1689241,
+            "traces": 50,
+            "total": 5000,
+            "wire_bound": null,
+            "canonical_sha256": "8f3de6d5a1f9c9204ec22d1d7af7a1d3b94da2ab05a0cc18c5828c35a702dd6d"
+          }
+        ],
+        "sample_count": 49
+      },
+      "fixed_restart_c4": {
+        "variant": "fixed",
+        "concurrency": 4,
+        "before": {
+          "rss": 2815221760,
+          "cgroup": 3055280128
+        },
+        "after": {
+          "rss": 3223875584,
+          "cgroup": 3452678144
+        },
+        "peak": {
+          "rss": 3223875584,
+          "cgroup": 3452678144
+        },
+        "outcomes": [
+          {
+            "success": true,
+            "seconds": 1.825,
+            "bytes": 1689241,
+            "traces": 50,
+            "total": 5000,
+            "wire_bound": 10599868,
+            "canonical_sha256": "8f3de6d5a1f9c9204ec22d1d7af7a1d3b94da2ab05a0cc18c5828c35a702dd6d"
+          },
+          {
+            "success": true,
+            "seconds": 1.806,
+            "bytes": 1689241,
+            "traces": 50,
+            "total": 5000,
+            "wire_bound": 10599868,
+            "canonical_sha256": "8f3de6d5a1f9c9204ec22d1d7af7a1d3b94da2ab05a0cc18c5828c35a702dd6d"
+          },
+          {
+            "success": true,
+            "seconds": 1.806,
+            "bytes": 1689241,
+            "traces": 50,
+            "total": 5000,
+            "wire_bound": 10599868,
+            "canonical_sha256": "8f3de6d5a1f9c9204ec22d1d7af7a1d3b94da2ab05a0cc18c5828c35a702dd6d"
+          },
+          {
+            "success": true,
+            "seconds": 1.811,
+            "bytes": 1689241,
+            "traces": 50,
+            "total": 5000,
+            "wire_bound": 10599868,
+            "canonical_sha256": "8f3de6d5a1f9c9204ec22d1d7af7a1d3b94da2ab05a0cc18c5828c35a702dd6d"
+          }
+        ],
+        "sample_count": 13
+      },
+      "warm_rounds": {
+        "old-warm-c4-1": {
+          "variant": "old",
+          "concurrency": 4,
+          "before": {
+            "rss": 3956936704,
+            "cgroup": 4134162432
+          },
+          "after": {
+            "rss": 4058038272,
+            "cgroup": 4235403264
+          },
+          "peak": {
+            "rss": 4058038272,
+            "cgroup": 4235403264
+          },
+          "outcomes": [
+            {
+              "success": true,
+              "seconds": 4.551,
+              "bytes": 1689241,
+              "traces": 50,
+              "total": 5000,
+              "wire_bound": null,
+              "canonical_sha256": "8f3de6d5a1f9c9204ec22d1d7af7a1d3b94da2ab05a0cc18c5828c35a702dd6d"
+            },
+            {
+              "success": true,
+              "seconds": 4.534,
+              "bytes": 1689241,
+              "traces": 50,
+              "total": 5000,
+              "wire_bound": null,
+              "canonical_sha256": "8f3de6d5a1f9c9204ec22d1d7af7a1d3b94da2ab05a0cc18c5828c35a702dd6d"
+            },
+            {
+              "success": true,
+              "seconds": 4.551,
+              "bytes": 1689241,
+              "traces": 50,
+              "total": 5000,
+              "wire_bound": null,
+              "canonical_sha256": "8f3de6d5a1f9c9204ec22d1d7af7a1d3b94da2ab05a0cc18c5828c35a702dd6d"
+            },
+            {
+              "success": true,
+              "seconds": 4.551,
+              "bytes": 1689241,
+              "traces": 50,
+              "total": 5000,
+              "wire_bound": null,
+              "canonical_sha256": "8f3de6d5a1f9c9204ec22d1d7af7a1d3b94da2ab05a0cc18c5828c35a702dd6d"
+            }
+          ],
+          "sample_count": 37
+        },
+        "old-warm-c4-2": {
+          "variant": "old",
+          "concurrency": 4,
+          "before": {
+            "rss": 4062138368,
+            "cgroup": 4239106048
+          },
+          "after": {
+            "rss": 4070961152,
+            "cgroup": 4248076288
+          },
+          "peak": {
+            "rss": 4070961152,
+            "cgroup": 4248326144
+          },
+          "outcomes": [
+            {
+              "success": true,
+              "seconds": 4.11,
+              "bytes": 1689241,
+              "traces": 50,
+              "total": 5000,
+              "wire_bound": null,
+              "canonical_sha256": "8f3de6d5a1f9c9204ec22d1d7af7a1d3b94da2ab05a0cc18c5828c35a702dd6d"
+            },
+            {
+              "success": true,
+              "seconds": 4.105,
+              "bytes": 1689241,
+              "traces": 50,
+              "total": 5000,
+              "wire_bound": null,
+              "canonical_sha256": "8f3de6d5a1f9c9204ec22d1d7af7a1d3b94da2ab05a0cc18c5828c35a702dd6d"
+            },
+            {
+              "success": true,
+              "seconds": 4.111,
+              "bytes": 1689241,
+              "traces": 50,
+              "total": 5000,
+              "wire_bound": null,
+              "canonical_sha256": "8f3de6d5a1f9c9204ec22d1d7af7a1d3b94da2ab05a0cc18c5828c35a702dd6d"
+            },
+            {
+              "success": true,
+              "seconds": 4.106,
+              "bytes": 1689241,
+              "traces": 50,
+              "total": 5000,
+              "wire_bound": null,
+              "canonical_sha256": "8f3de6d5a1f9c9204ec22d1d7af7a1d3b94da2ab05a0cc18c5828c35a702dd6d"
+            }
+          ],
+          "sample_count": 33
+        },
+        "fixed-warm-c4-1": {
+          "variant": "fixed",
+          "concurrency": 4,
+          "before": {
+            "rss": 3235164160,
+            "cgroup": 3464736768
+          },
+          "after": {
+            "rss": 3250688000,
+            "cgroup": 3478396928
+          },
+          "peak": {
+            "rss": 3250688000,
+            "cgroup": 3478396928
+          },
+          "outcomes": [
+            {
+              "success": true,
+              "seconds": 0.672,
+              "bytes": 1689241,
+              "traces": 50,
+              "total": 5000,
+              "wire_bound": 10599868,
+              "canonical_sha256": "8f3de6d5a1f9c9204ec22d1d7af7a1d3b94da2ab05a0cc18c5828c35a702dd6d"
+            },
+            {
+              "success": true,
+              "seconds": 0.663,
+              "bytes": 1689241,
+              "traces": 50,
+              "total": 5000,
+              "wire_bound": 10599868,
+              "canonical_sha256": "8f3de6d5a1f9c9204ec22d1d7af7a1d3b94da2ab05a0cc18c5828c35a702dd6d"
+            },
+            {
+              "success": true,
+              "seconds": 0.652,
+              "bytes": 1689241,
+              "traces": 50,
+              "total": 5000,
+              "wire_bound": 10599868,
+              "canonical_sha256": "8f3de6d5a1f9c9204ec22d1d7af7a1d3b94da2ab05a0cc18c5828c35a702dd6d"
+            },
+            {
+              "success": true,
+              "seconds": 0.664,
+              "bytes": 1689241,
+              "traces": 50,
+              "total": 5000,
+              "wire_bound": 10599868,
+              "canonical_sha256": "8f3de6d5a1f9c9204ec22d1d7af7a1d3b94da2ab05a0cc18c5828c35a702dd6d"
+            }
+          ],
+          "sample_count": 7
+        },
+        "fixed-warm-c4-2": {
+          "variant": "fixed",
+          "concurrency": 4,
+          "before": {
+            "rss": 3261370368,
+            "cgroup": 3489402880
+          },
+          "after": {
+            "rss": 3265830912,
+            "cgroup": 3493793792
+          },
+          "peak": {
+            "rss": 3265830912,
+            "cgroup": 3493793792
+          },
+          "outcomes": [
+            {
+              "success": true,
+              "seconds": 0.665,
+              "bytes": 1689241,
+              "traces": 50,
+              "total": 5000,
+              "wire_bound": 10599868,
+              "canonical_sha256": "8f3de6d5a1f9c9204ec22d1d7af7a1d3b94da2ab05a0cc18c5828c35a702dd6d"
+            },
+            {
+              "success": true,
+              "seconds": 0.648,
+              "bytes": 1689241,
+              "traces": 50,
+              "total": 5000,
+              "wire_bound": 10599868,
+              "canonical_sha256": "8f3de6d5a1f9c9204ec22d1d7af7a1d3b94da2ab05a0cc18c5828c35a702dd6d"
+            },
+            {
+              "success": true,
+              "seconds": 0.657,
+              "bytes": 1689241,
+              "traces": 50,
+              "total": 5000,
+              "wire_bound": 10599868,
+              "canonical_sha256": "8f3de6d5a1f9c9204ec22d1d7af7a1d3b94da2ab05a0cc18c5828c35a702dd6d"
+            },
+            {
+              "success": true,
+              "seconds": 0.639,
+              "bytes": 1689241,
+              "traces": 50,
+              "total": 5000,
+              "wire_bound": 10599868,
+              "canonical_sha256": "8f3de6d5a1f9c9204ec22d1d7af7a1d3b94da2ab05a0cc18c5828c35a702dd6d"
+            }
+          ],
+          "sample_count": 7
+        }
+      },
+      "integration_tests": {
+        "aivision": {
+          "top_level_pass": 188,
+          "subtests_pass": 309,
+          "skips": [
+            "--- SKIP: TestExportTracePageMemorySQL (0.00s)"
+          ],
+          "real_database_tests": [
+            "--- PASS: TestOceanBaseTraceReadModel (6.83s)",
+            "--- PASS: TestOceanBaseTraceReadModelScopeRetag (3.36s)",
+            "--- PASS: TestOceanBaseProjectionMaintenanceConcurrency (3.91s)",
+            "--- PASS: TestOceanBaseCanonicalSessionReadModel (5.73s)",
+            "--- PASS: TestOceanBaseSessionTokenQuerySemantics (0.16s)",
+            "--- PASS: TestOceanBaseSkillSpans (2.95s)",
+            "--- PASS: TestOceanBaseNativeTracePage (17.84s)",
+            "--- PASS: TestOceanBaseTracePageDimensionsBackfillAndUpdate (3.27s)",
+            "--- PASS: TestOceanBaseRecoveryWindowMergesAndFallsBack (4.01s)"
+          ]
+        },
+        "ingest": {
+          "top_level_pass": 52,
+          "subtests_pass": 16,
+          "skips": [],
+          "real_database_tests": [
+            "--- PASS: TestOceanBaseProjectionMaintenanceLifecycle (3.76s)",
+            "--- PASS: TestOceanBaseTraceContentColumnAdditiveSemantics (0.50s)"
+          ]
+        }
+      },
+      "migration": {
+        "seconds": 10.531091416953132,
+        "exit_code": 0,
+        "stdout": "ready=true err=<nil>\n",
+        "stderr": "",
+        "before": {
+          "rss": 4113375232,
+          "cgroup": 4397522944
+        },
+        "after": {
+          "rss": 4036767744,
+          "cgroup": 4377137152
+        },
+        "peak": {
+          "rss": 4139958272,
+          "cgroup": 4429541376
+        }
+      }
+    }
+  },
+  "limits": [
+    "Four direct SQL callers bypass the HTTP admission limit.",
+    "seekdb timed encoded-page preflight and page query; CE also timed the metadata preflight. Schema checks are covered by integration tests, not the timed SQL.",
+    "Process restarts do not clear the OS page cache. The original query ran first.",
+    "Sampled RSS/cgroup values can miss short peaks.",
+    "Different memory budgets/storage prevent a seekdb-versus-CE ranking.",
+    "Production capacity, ingestion throughput impact, multi-day leaks, other database versions and distributed CE are unverified."
+  ],
+  "source_identity": {
+    "product_base": "366c7b7fe0d95e528f6b1ecd17019c2f9db86f74",
+    "signoz_base": "5b3dde03261a512893dbcb1e889aac429b56b5ad",
+    "implementation_files_unchanged_since_retest": true,
+    "tested_files_sha256": {
+      "pkg/ingest/ingest.go": "e6f3f88e47459eb9d7fe9770ef4f45467d4fdc2c6137a6bca09af91e8a64a7e9",
+      "pkg/modules/aivision/handler.go": "f492a3969d71ccb0b85c849c79899e1eb8ae20e62f6f7adc87cc61aa32d88571",
+      "pkg/modules/aivision/read_model.go": "2c5c802a048a9031a5477a18026e5a3f97c432fbff8d1d163a6cf23232e168bf",
+      "pkg/modules/aivision/read_model_source_page.go": "a2a8833bff74db0d7ff69a1386d0f63b28c7abe83f8f77b410e3524c3f522c4d",
+      "pkg/modules/aivision/read_model_source_page_test.go": "7814cd1ead509b387f92df48d265970246ff3b7bbe6edb2cec062c2b9e814cdb",
+      "pkg/modules/aivision/trace_page.go": "e9e0446ee012121c2413b03d12b0a5d1ae71016d59c35da75bcc9bb6159ed12c",
+      "pkg/modules/aivision/trace_page_integration_test.go": "33f03f87c3076c0a6a3dd9626a78dd75620f795a4bfb76ca8b375d63b4ea9ab7",
+      "pkg/modules/aivision/trace_page_test.go": "50d1e9a40b380bbce4656e7379cb4c604d55ec017a45ec701223daf0546782ce",
+      "pkg/modules/aivision/trace_window.go": "2aeef813accebdaea57c9ecc38fc03eef7fc9b146971bb2c2ac09f48c944cafd",
+      "pkg/modules/aivision/trace_window_budget.go": "94bec33a4662869f74899b2a429a4d9b9ffbf0e48e3fd5a02070b24a490e9e9f",
+      "pkg/modules/aivision/trace_window_budget_test.go": "8c3b4d98a41eaa62d80731f67abadf60e016081e7977986556946a10d81fc717",
+      "pkg/ingest/trace_page_dimensions.go": "b13bb2b26402c99688493d24621f6a814f1166c84ff46d33ba05b0425f10b17d",
+      "pkg/modules/aivision/trace_page_memory_test.go": "bd0c91ae9c0c96dc01ad3ce8aa8d067251887d8eae92b706070c82bb4b86a5b9"
+    }
+  }
+}

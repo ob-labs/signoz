@@ -118,6 +118,9 @@ func AddToRouter(router *mux.Router, cfg Config, logger *slog.Logger) error {
 		_ = db.Close()
 		return err
 	}
+	if err := InitializeTracePageDimensions(context.Background(), db, cfg.TablePrefix); err != nil {
+		logger.Warn("trace page metadata unavailable; ingestion retained", "error", err)
+	}
 	initCtx, initCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	if err := initializeProjectionMaintenance(initCtx, db, cfg); err != nil {
 		logger.Warn("projection maintenance unavailable; raw ingestion retained with shared eligibility fence", "error", err)

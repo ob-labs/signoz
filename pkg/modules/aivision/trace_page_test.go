@@ -11,7 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	cmock "github.com/SigNoz/clickhouse-go-mock"
+	"github.com/SigNoz/signoz/pkg/ingest"
 	"github.com/SigNoz/signoz/pkg/telemetrystore"
 	"github.com/SigNoz/signoz/pkg/types/authtypes"
 	"github.com/stretchr/testify/require"
@@ -292,13 +294,37 @@ func TestTracePageHandlerPreservesExactFiltersAndClaimsAtStorageBoundary(t *test
 	r := tracePageUnitRequest(params, true)
 	r.Header.Set("X-SigNoz-OrgId", "00000000-0000-4000-8000-000000000002")
 	w := httptest.NewRecorder()
-	tracePageUnitHandler(store).TracePage(w, r)
-	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-	require.Equal(t, 1, store.queries)
-	for _, value := range []any{tracePageUnitOrg, "space-a", "subject-a", "Codex", "agent-a", int64(1790812800000000001), " trace ", " prod ", " sdk "} {
-		require.Contains(t, store.args, value, "the bound query must preserve authorized scope and exact values")
+	h := tracePageUnitHandler(store)
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	require.NoError(t, err)
+	defer db.Close()
+	h.backend.db = db
+	h.backend.cfg.TablePrefix = "test"
+	mock.ExpectBegin()
+	for _, col := range [][3]string{{ingest.TracePageDimensionsColumn, "longtext", ingest.TracePageDimensionsExpression}, {ingest.TracePageSourceBytesColumn, "bigint", ingest.TracePageSourceBytesExpression}} {
+		mock.ExpectQuery("SELECT COLUMN_TYPE,EXTRA,GENERATION_EXPRESSION").WithArgs("test_traces", col[0]).WillReturnRows(sqlmock.NewRows([]string{"type", "extra", "expression"}).AddRow(col[1], "STORED GENERATED", col[2]))
 	}
-	require.NotContains(t, store.args, r.Header.Get("X-SigNoz-OrgId"))
+	mock.ExpectQuery("SELECT COUNT").WillReturnRows(sqlmock.NewRows([]string{"count", "bytes", "max"}).AddRow(0, 0, 0))
+	mock.ExpectQuery("WITH base").WillReturnRows(sqlmock.NewRows([]string{"bytes"}).AddRow(4096))
+	// Capture the bound values at the transactional database boundary.
+	mock.ExpectQuery("WITH base").WillReturnRows(sqlmock.NewRows([]string{"trace_page_rows"}).AddRow(envelope))
+	mock.ExpectCommit()
+	h.TracePage(w, r)
+	require.NoError(t, mock.ExpectationsWereMet())
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	parsed, err := h.nativeParams(r)
+	require.NoError(t, err)
+	parsed.AgentUUID = "agent-a"
+	parsed.Env = " prod "
+	parsed.Keyword = " trace "
+	parsed.Tags = []string{" sdk "}
+	parsed.Filters = []nativeFilter{{Field: "start_time_unix_nano", Op: ">=", Value: json.Number("1790812800000000001")}}
+	_, bound, err := buildTracePageSQL(h.backend.tracesTable(), tracePageUnitOrg, parsed, 10000)
+	require.NoError(t, err)
+	for _, value := range []any{tracePageUnitOrg, "space-a", "subject-a", "Codex", "agent-a", int64(1790812800000000001), " trace ", " prod ", " sdk "} {
+		require.Contains(t, bound, value, "the bound query must preserve authorized scope and exact values")
+	}
+	require.NotContains(t, bound, r.Header.Get("X-SigNoz-OrgId"))
 	var response struct {
 		Data struct {
 			Meta map[string]any `json:"meta"`
@@ -325,4 +351,13 @@ func TestTracePageJSONRejectsMalformedOrMultipleDocuments(t *testing.T) {
 	value, err := tracePageJSON([]byte("{\"value\":1790812800000000001} \n\t"))
 	require.NoError(t, err)
 	require.Equal(t, json.Number("1790812800000000001"), value["value"])
+}
+
+func TestTracePageDoesNotParseNonPagePayloads(t *testing.T) {
+	query, _, err := buildTracePageSQL("traces", "org", nativeListParams{From: 1790985600000, To: 1791244800000, Page: 1, Limit: 50, SpaceID: "space"}, 10000)
+	require.NoError(t, err)
+	beforePage := strings.Split(query, "), page AS (")[0]
+	require.NotContains(t, beforePage, "JSON_EXTRACT(payload")
+	require.NotContains(t, beforePage, "SELECT t.*")
+	require.Contains(t, beforePage, "page_dimensions_v1")
 }
