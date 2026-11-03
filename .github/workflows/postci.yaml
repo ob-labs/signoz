@@ -9,7 +9,11 @@ on:
 
 jobs:
   remove:
-    if: github.event.pull_request.head.repo.fork || github.event.pull_request.user.login == 'dependabot[bot]'
+    # Downstream review labels are reapplied manually for each reviewed head.
+    # Do not require the upstream Primus app or inherit its credentials here.
+    if: |
+      github.repository == 'SigNoz/signoz' &&
+      (github.event.pull_request.head.repo.fork || github.event.pull_request.user.login == 'dependabot[bot]')
     uses: signoz/primus.workflows/.github/workflows/github-label.yaml@main
     secrets: inherit
     with:
