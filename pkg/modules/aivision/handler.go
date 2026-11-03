@@ -18,6 +18,7 @@ import (
 )
 
 type Handler interface {
+	ReadModel(http.ResponseWriter, *http.Request)
 	Traces(http.ResponseWriter, *http.Request)
 	TracePage(http.ResponseWriter, *http.Request)
 	TraceFacets(http.ResponseWriter, *http.Request)
@@ -84,6 +85,10 @@ func (h *handler) Traces(response http.ResponseWriter, request *http.Request) {
 		writeAPIError(response, http.StatusBadRequest, "bad_data", err.Error())
 		return
 	}
+	if !acquireTraceQuery(response) {
+		return
+	}
+	defer releaseTraceQuery()
 	ctx, cancel := context.WithTimeout(request.Context(), h.cfg.QueryTimeout)
 	defer cancel()
 	result, err := h.backend.listTraces(ctx, orgID, params)
@@ -108,6 +113,10 @@ func (h *handler) TraceFacets(response http.ResponseWriter, request *http.Reques
 		writeAPIError(response, http.StatusBadRequest, "bad_data", err.Error())
 		return
 	}
+	if !acquireTraceQuery(response) {
+		return
+	}
+	defer releaseTraceQuery()
 	ctx, cancel := context.WithTimeout(request.Context(), h.cfg.QueryTimeout)
 	defer cancel()
 	result, err := h.backend.listTraceFacets(ctx, orgID, params)
@@ -136,6 +145,10 @@ func (h *handler) TraceIOBatch(response http.ResponseWriter, request *http.Reque
 		writeAPIError(response, http.StatusBadRequest, "bad_data", "trace_ids requires 1 to 100 items")
 		return
 	}
+	if !acquireTraceQuery(response) {
+		return
+	}
+	defer releaseTraceQuery()
 	ctx, cancel := context.WithTimeout(request.Context(), h.cfg.QueryTimeout)
 	defer cancel()
 	result, err := h.backend.getTraceIOBatch(ctx, orgID, params)
@@ -164,6 +177,10 @@ func (h *handler) TraceUsageBatch(response http.ResponseWriter, request *http.Re
 		writeAPIError(response, http.StatusBadRequest, "bad_data", "trace_ids requires 1 to 100 items")
 		return
 	}
+	if !acquireTraceQuery(response) {
+		return
+	}
+	defer releaseTraceQuery()
 	ctx, cancel := context.WithTimeout(request.Context(), h.cfg.QueryTimeout)
 	defer cancel()
 	result, err := h.backend.getTraceUsageBatch(ctx, orgID, params)
@@ -197,6 +214,10 @@ func (h *handler) SpanBatch(response http.ResponseWriter, request *http.Request)
 		writeAPIError(response, http.StatusBadRequest, "bad_data", "span_ids requires 1 to 200 items")
 		return
 	}
+	if !acquireTraceQuery(response) {
+		return
+	}
+	defer releaseTraceQuery()
 	ctx, cancel := context.WithTimeout(request.Context(), h.cfg.QueryTimeout)
 	defer cancel()
 	result, err := h.backend.getSpanBatch(ctx, orgID, params)
@@ -226,6 +247,10 @@ func (h *handler) TraceDetail(response http.ResponseWriter, request *http.Reques
 		writeAPIError(response, http.StatusBadRequest, "bad_data", err.Error())
 		return
 	}
+	if !acquireTraceQuery(response) {
+		return
+	}
+	defer releaseTraceQuery()
 	ctx, cancel := context.WithTimeout(request.Context(), h.cfg.QueryTimeout)
 	defer cancel()
 	result, err := h.backend.getTraceDetail(ctx, orgID, traceID, params)
@@ -250,6 +275,10 @@ func (h *handler) McpTools(response http.ResponseWriter, request *http.Request) 
 		writeAPIError(response, http.StatusBadRequest, "bad_data", err.Error())
 		return
 	}
+	if !acquireTraceQuery(response) {
+		return
+	}
+	defer releaseTraceQuery()
 	ctx, cancel := context.WithTimeout(request.Context(), h.cfg.QueryTimeout)
 	defer cancel()
 	result, err := h.backend.listMcpTools(ctx, orgID, params)
@@ -274,6 +303,10 @@ func (h *handler) SkillSpans(response http.ResponseWriter, request *http.Request
 		writeAPIError(response, http.StatusBadRequest, "bad_data", err.Error())
 		return
 	}
+	if !acquireTraceQuery(response) {
+		return
+	}
+	defer releaseTraceQuery()
 	ctx, cancel := context.WithTimeout(request.Context(), h.cfg.QueryTimeout)
 	defer cancel()
 	result, err := h.backend.listSkillSpans(ctx, orgID, params)
@@ -302,6 +335,10 @@ func (h *handler) Sessions(response http.ResponseWriter, request *http.Request) 
 		writeAPIError(response, http.StatusBadRequest, "bad_data", err.Error())
 		return
 	}
+	if !acquireTraceQuery(response) {
+		return
+	}
+	defer releaseTraceQuery()
 	ctx, cancel := context.WithTimeout(request.Context(), h.cfg.QueryTimeout)
 	defer cancel()
 	result, err := h.backend.listSessions(ctx, orgID, params)
@@ -330,6 +367,10 @@ func (h *handler) SessionIOBatch(response http.ResponseWriter, request *http.Req
 		writeAPIError(response, http.StatusBadRequest, "bad_data", "session_ids requires 1 to 100 items")
 		return
 	}
+	if !acquireTraceQuery(response) {
+		return
+	}
+	defer releaseTraceQuery()
 	ctx, cancel := context.WithTimeout(request.Context(), h.cfg.QueryTimeout)
 	defer cancel()
 	result, err := h.backend.getSessionIOBatch(ctx, orgID, params)
@@ -358,6 +399,10 @@ func (h *handler) SessionUsageBatch(response http.ResponseWriter, request *http.
 		writeAPIError(response, http.StatusBadRequest, "bad_data", "session_ids requires 1 to 100 items")
 		return
 	}
+	if !acquireTraceQuery(response) {
+		return
+	}
+	defer releaseTraceQuery()
 	ctx, cancel := context.WithTimeout(request.Context(), h.cfg.QueryTimeout)
 	defer cancel()
 	result, err := h.backend.getSessionUsageBatch(ctx, orgID, params)
@@ -387,6 +432,10 @@ func (h *handler) SessionDetail(response http.ResponseWriter, request *http.Requ
 		writeAPIError(response, http.StatusBadRequest, "bad_data", err.Error())
 		return
 	}
+	if !acquireTraceQuery(response) {
+		return
+	}
+	defer releaseTraceQuery()
 	ctx, cancel := context.WithTimeout(request.Context(), h.cfg.QueryTimeout)
 	defer cancel()
 	result, err := h.backend.getSessionDetail(ctx, orgID, sessionID, params)
@@ -410,6 +459,10 @@ func (h *handler) EventsMetadata(response http.ResponseWriter, request *http.Req
 		SpaceID:      strings.TrimSpace(request.URL.Query().Get("space_id")),
 		AgentProduct: strings.TrimSpace(request.URL.Query().Get("agent_product")),
 	}
+	if !acquireTraceQuery(response) {
+		return
+	}
+	defer releaseTraceQuery()
 	ctx, cancel := context.WithTimeout(request.Context(), h.cfg.QueryTimeout)
 	defer cancel()
 	result, err := h.backend.eventMetadata(ctx, orgID, payload)
@@ -435,6 +488,10 @@ func (h *handler) EventsList(response http.ResponseWriter, request *http.Request
 		writeAPIError(response, http.StatusBadRequest, "bad_data", err.Error())
 		return
 	}
+	if !acquireTraceQuery(response) {
+		return
+	}
+	defer releaseTraceQuery()
 	ctx, cancel := context.WithTimeout(request.Context(), h.cfg.QueryTimeout)
 	defer cancel()
 	result, err := h.backend.listEvents(ctx, orgID, payload)
@@ -459,6 +516,10 @@ func (h *handler) EventsFacets(response http.ResponseWriter, request *http.Reque
 		writeAPIError(response, http.StatusBadRequest, "bad_data", err.Error())
 		return
 	}
+	if !acquireTraceQuery(response) {
+		return
+	}
+	defer releaseTraceQuery()
 	ctx, cancel := context.WithTimeout(request.Context(), h.cfg.QueryTimeout)
 	defer cancel()
 	result, err := h.backend.listEventFacets(ctx, orgID, payload)
@@ -492,6 +553,10 @@ func (h *handler) Dashboard(response http.ResponseWriter, request *http.Request)
 		writeAPIError(response, http.StatusBadRequest, "bad_data", "space_id must be a non-empty string of at most 255 characters")
 		return
 	}
+	if !acquireTraceQuery(response) {
+		return
+	}
+	defer releaseTraceQuery()
 	ctx, cancel := context.WithTimeout(request.Context(), h.cfg.QueryTimeout)
 	defer cancel()
 	result, err := h.backend.dashboardQuery(ctx, orgID, payload)
@@ -530,6 +595,7 @@ func (h *handler) nativeParams(request *http.Request) (nativeListParams, error) 
 	params.Scene = strings.TrimSpace(query.Get("scene"))
 	params.Username = strings.TrimSpace(query.Get("username"))
 	params.IncludeSpans = isTruthyNativeParam(query.Get("include_spans"))
+	params.SpansOnly = isTruthyNativeParam(query.Get("spans_only"))
 
 	var err error
 	if params.Fields, err = parseNativeStringList(query["fields"]); err != nil {
@@ -658,7 +724,9 @@ func (h *handler) decodeNativeBatch(response http.ResponseWriter, request *http.
 }
 
 func (h *handler) writeBackendError(rw http.ResponseWriter, err error) {
-	if errors.Is(err, errNotFound) {
+	if errors.Is(err, errTraceWindowResourceBudget) || errors.Is(err, errTraceWindowPayloadBudget) || errors.Is(err, errTracePageBudget) {
+		writeTraceCapacityError(rw, http.StatusRequestEntityTooLarge, err.Error())
+	} else if errors.Is(err, errNotFound) {
 		render.Error(rw, errors.NewNotFoundf(errors.CodeNotFound, "resource not found"))
 	} else if errors.Is(err, context.DeadlineExceeded) {
 		render.Error(rw, errors.New(errors.TypeTimeout, errors.CodeTimeout, "query timed out"))
@@ -686,6 +754,10 @@ func writeJSON(response http.ResponseWriter, status int, payload any) {
 }
 
 func writeAPIError(rw http.ResponseWriter, status int, kind, message string) {
+	if status == http.StatusForbidden {
+		render.Error(rw, errors.NewForbiddenf(errors.CodeForbidden, "%s", message))
+		return
+	}
 	render.Error(rw, errors.NewInvalidInputf(errors.CodeInvalidInput, "%s", message))
 }
 func methodNotAllowed(rw http.ResponseWriter, allowed string) {

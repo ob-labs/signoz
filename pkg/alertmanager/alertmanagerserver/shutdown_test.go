@@ -145,6 +145,9 @@ func (s *shutdownStateStore) Get(ctx context.Context, orgID string) (*alertmanag
 }
 
 func (s *shutdownStateStore) Set(ctx context.Context, state *alertmanagertypes.StoreableState) error {
+	if !s.armed.Load() {
+		return s.StateStore.Set(ctx, state)
+	}
 	defer s.mu.Unlock()
 	s.first.Do(func() { close(s.writing) })
 	<-s.release

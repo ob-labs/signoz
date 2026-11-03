@@ -12,6 +12,7 @@ import (
 
 func init() {
 	var port int
+	var ready bool
 	command := &cobra.Command{
 		Use:   "healthcheck",
 		Short: "Check the local SigNoz HTTP server without starting services",
@@ -27,7 +28,11 @@ func init() {
 					return http.ErrUseLastResponse
 				},
 			}
-			url := "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(port)) + "/api/v1/health"
+			path := "/api/v1/health"
+			if ready {
+				path = "/api/v1/ready"
+			}
+			url := "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(port)) + path
 			request, err := http.NewRequestWithContext(command.Context(), http.MethodGet, url, nil)
 			if err != nil {
 				return err
@@ -44,5 +49,6 @@ func init() {
 		},
 	}
 	command.Flags().IntVar(&port, "port", 8080, "local API server port (match apiserver.address when customized)")
+	command.Flags().BoolVar(&ready, "ready", false, "check telemetry database readiness instead of local HTTP liveness")
 	RootCmd.AddCommand(command)
 }

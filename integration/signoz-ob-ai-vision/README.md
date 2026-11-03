@@ -58,6 +58,31 @@ and replaces its address with `SIGNOZ_TEST_OCEANBASE_ADDRESS`
 
 Tests create and drop their own `sn_test_*` temporary tables.
 
+### MCP and Skill span scans
+
+`GET /api/v1/ai-vision/mcp/tools?spans_only=true` returns the usual `spans`
+and `spanMeta` without computing tool summaries. In this mode, `data` is empty
+and `meta` has zero totals; consumers must read `spanMeta` for candidate counts.
+The default response continues to include tool summaries.
+
+MCP and Skill span pages use `COUNT(*) OVER ()` so the count and current page
+share one SQL statement and storage snapshot. Empty pages after page one use
+a separate count. Ordering uses timestamp, trace ID and span ID for stable ties.
+Skill argument keys are extracted together instead of repeatedly parsing the
+same attribute document. These changes do not provide a snapshot across
+separate page requests.
+
+With `SIGNOZ_TEST_OCEANBASE_DSN` configured, run:
+
+```bash
+go test ./pkg/modules/aivision \
+  -run 'Test(Candidate|OceanBaseSkillSpans)' -count=1 -v
+```
+
+The integration test creates and drops its own `sn_skill_*` table. It verifies
+matching scan results with and without tool summaries, tied pages, empty pages,
+out-of-range counts and Skill argument shapes against the previous predicate.
+
 ## HTTP smoke tests
 
 The Python standard-library script writes synthetic traces, logs, and metrics

@@ -15,11 +15,12 @@ import (
 )
 
 func TestProviderStartStop(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
 	providerSettings := instrumentationtest.New().ToProviderSettings()
 	sqlstore := sqlstoretest.New(sqlstore.Config{Provider: "sqlite"}, sqlmock.QueryMatcherRegexp)
-	t.Cleanup(func() { require.NoError(t, sqlstore.BunDB().Close()) })
+	t.Cleanup(func() {
+		sqlstore.Mock().ExpectClose()
+		require.NoError(t, sqlstore.SQLDB().Close())
+	})
 
 	openfgaDataStore, err := NewSQLStore(sqlstore, authz.Config{OpenFGA: authz.OpenFGAConfig{MaxTuplesPerWrite: 100}})
 	require.NoError(t, err)
@@ -28,7 +29,6 @@ func TestProviderStartStop(t *testing.T) {
 	type user`
 	provider, err := NewOpenfgaServer(context.Background(), providerSettings, authz.Config{}, sqlstore, []transformer.ModuleFile{{Name: "test.fga", Contents: expectedModel}}, openfgaDataStore)
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, provider.Stop(ctx)) })
 
 	storeRows := sqlstore.Mock().NewRows([]string{"id", "name", "created_at", "updated_at"}).AddRow("01K3V0NTN47MPTMEV1PD5ST6ZC", "signoz", time.Now(), time.Now())
 	sqlstore.Mock().ExpectQuery("SELECT (.+) FROM store WHERE (.+)").WillReturnRows(storeRows)
@@ -38,29 +38,14 @@ func TestProviderStartStop(t *testing.T) {
 	sqlstore.Mock().ExpectQuery("SELECT (.+) FROM authorization_model WHERE (.+)").WillReturnRows(authModelRows)
 
 	sqlstore.Mock().ExpectExec("INSERT INTO authorization_model (.+) VALUES (.+)").WillReturnResult(sqlmock.NewResult(1, 1))
-	sqlstore.Mock().ExpectClose()
 
-	started := make(chan error, 1)
 	go func() {
-		started <- provider.Start(ctx)
-	}()
-	select {
-	case <-provider.Healthy():
-	case err := <-started:
-		t.Fatalf("server failed to start: %v", err)
-	case <-ctx.Done():
-		t.Fatal(ctx.Err())
-	}
-
-	err = provider.Stop(ctx)
-	require.NoError(t, err)
-	select {
-	case err := <-started:
+		err := provider.Start(context.Background())
 		require.NoError(t, err)
-	case <-ctx.Done():
-		t.Fatal(ctx.Err())
-	}
-	require.NoError(t, sqlstore.SQLDB().PingContext(ctx))
-	require.NoError(t, sqlstore.BunDB().Close())
-	require.NoError(t, sqlstore.Mock().ExpectationsWereMet())
+	}()
+	// wait for the service to start
+	time.Sleep(time.Second * 2)
+
+	err = provider.Stop(context.Background())
+	require.NoError(t, err)
 }

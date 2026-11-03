@@ -91,6 +91,28 @@ This command:
 > 💡 **Tip**: The API server runs at `http://localhost:8080/` by default. You can configure this using `apiserver.address` configuration option. See
 > [running more than one instance](#how-do-i-run-more-than-one-instance) if you need that for agentic testing.
 
+The health endpoint above checks HTTP liveness. For telemetry database readiness,
+use the anonymous `GET /api/v1/ready` endpoint. It executes a read-only `SELECT 1`
+through the configured OceanBase or ClickHouse telemetry store with a one-second
+context deadline. A successful scalar result returns HTTP 200 and
+`{"status":"ok"}`; a database, query or timeout failure returns HTTP 503 and
+`{"status":"unavailable"}`, without connection or error details. Request
+cancellation is forwarded to the query. The response does not establish that
+schema migrations, authenticated ingestion or query readback have succeeded.
+
+The scratch distribution supports both probes without curl or a shell:
+
+```bash
+/app/signoz healthcheck          # local /api/v1/health liveness
+/app/signoz healthcheck --ready  # /api/v1/ready telemetry database readiness
+```
+
+Both commands require HTTP 200 within two seconds and reject redirects.
+`--port` selects a custom local API port. Keep liveness on the default command so
+that a telemetry database outage removes readiness without forcing an HTTP
+process restart. The legacy `/api/v1/health?live` query still uses the historical
+ClickHouse reader and is not a readiness probe for OceanBase.
+
 ### 4. Setting up the Frontend
 
 1. Navigate to the frontend directory:

@@ -2,9 +2,9 @@ package openfgaserver
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,139 +13,158 @@ import (
 	"github.com/SigNoz/signoz/pkg/sqlstore"
 	"github.com/SigNoz/signoz/pkg/sqlstore/sqlitesqlstore"
 	"github.com/openfga/language/pkg/go/transformer"
-	"github.com/openfga/openfga/pkg/storage"
-	"github.com/openfga/openfga/pkg/storage/memory"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
+	"github.com/uptrace/bun"
+	"github.com/uptrace/bun/dialect/pgdialect"
 )
 
-func newSharedSQLStore(t *testing.T) sqlstore.SQLStore {
+func realSharedSQLStore(t *testing.T) sqlstore.SQLStore {
 	t.Helper()
-	config := sqlstore.NewConfigFactory().New().(sqlstore.Config)
-	config.Sqlite.Path = filepath.Join(t.TempDir(), "metadata.db")
-	store, err := sqlitesqlstore.New(context.Background(), instrumentationtest.New().ToProviderSettings(), config)
+	store, err := sqlitesqlstore.New(context.Background(), instrumentationtest.New().ToProviderSettings(), sqlstore.Config{
+		Provider:   "sqlite",
+		Connection: sqlstore.ConnectionConfig{MaxOpenConns: 4},
+		Sqlite: sqlstore.SqliteConfig{
+			Path: filepath.Join(t.TempDir(), "metadata.db"), Mode: "wal",
+			BusyTimeout: time.Second, TransactionMode: "immediate",
+		},
+	})
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, store.BunDB().Close()) })
+	t.Cleanup(func() { require.NoError(t, store.SQLDB().Close()) })
+	_, err = store.SQLDB().Exec("CREATE TABLE shutdown_snapshot (value TEXT NOT NULL)")
+	require.NoError(t, err)
 	return store
 }
 
-func TestSQLStoreClosePreservesSharedPool(t *testing.T) {
-	ctx := context.Background()
-	store := newSharedSQLStore(t)
-	datastore, err := NewSQLStore(store, authz.Config{OpenFGA: authz.OpenFGAConfig{MaxTuplesPerWrite: 42}})
+func sharedSQLServer(t *testing.T, store sqlstore.SQLStore) *Server {
+	t.Helper()
+	config := authz.Config{OpenFGA: authz.OpenFGAConfig{MaxTuplesPerWrite: 100}}
+	datastore, err := NewSQLStore(store, config)
 	require.NoError(t, err)
-	require.Equal(t, 42, datastore.MaxTuplesPerWrite())
+	server, err := NewOpenfgaServer(context.Background(), instrumentationtest.New().ToProviderSettings(), config, store,
+		[]transformer.ModuleFile{{Name: "test.fga", Contents: "module base\ntype user"}}, datastore)
+	require.NoError(t, err)
+	return server
+}
 
-	_, err = store.SQLDB().ExecContext(ctx, "CREATE TABLE shutdown_state (value TEXT)")
-	require.NoError(t, err)
-	datastore.Close()
-	datastore.Close()
+func TestAuthzStopPreservesSharedPoolForFinalShutdownWrite(t *testing.T) {
+	store := realSharedSQLStore(t)
+	// The two metadata tables used by real OpenFGA startup. The remaining
+	// consumer is independent of authorization and writes its own final state.
+	for _, statement := range []string{
+		"CREATE TABLE store (id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP, deleted_at TIMESTAMP)",
+		"CREATE TABLE authorization_model (store TEXT NOT NULL, authorization_model_id TEXT NOT NULL, schema_version TEXT NOT NULL, serialized_protobuf BLOB NOT NULL, PRIMARY KEY (store, authorization_model_id))",
+	} {
+		_, err := store.SQLDB().Exec(statement)
+		require.NoError(t, err)
+	}
+	server := sharedSQLServer(t, store)
+	started := make(chan error, 1)
+	go func() { started <- server.Start(context.Background()) }()
+	select {
+	case <-server.Healthy():
+	case err := <-started:
+		t.Fatalf("authorization startup failed: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("authorization startup did not become healthy")
+	}
 
-	// Another consumer's final write must succeed even after authz has closed.
-	_, err = store.SQLDB().ExecContext(ctx, "INSERT INTO shutdown_state VALUES ('persisted')")
-	require.NoError(t, err)
+	stopped := make(chan struct{})
+	finalWrite := make(chan error, 1)
+	go func() {
+		<-stopped
+		_, err := store.SQLDB().Exec("INSERT INTO shutdown_snapshot VALUES (?)", "final state")
+		finalWrite <- err
+	}()
+	require.NoError(t, server.Stop(context.Background()))
+	// This barrier forces authorization cleanup to finish first. It cannot
+	// pass merely because the other service happened to win a shutdown race.
+	close(stopped)
+	require.NoError(t, <-finalWrite, "another consumer must retain SQL access after authorization stops")
+	require.NoError(t, <-started)
 	var value string
-	require.NoError(t, store.SQLDB().QueryRowContext(ctx, "SELECT value FROM shutdown_state").Scan(&value))
-	require.Equal(t, "persisted", value)
+	require.NoError(t, store.SQLDB().QueryRow("SELECT value FROM shutdown_snapshot").Scan(&value))
+	require.Equal(t, "final state", value)
 
-	// The owner still controls the real pool lifetime.
-	require.NoError(t, store.BunDB().Close())
-	require.ErrorContains(t, store.SQLDB().PingContext(ctx), "database is closed")
+	// The platform owner still controls the real pool's final release.
+	require.NoError(t, store.SQLDB().Close())
+	require.ErrorContains(t, store.SQLDB().Ping(), "database is closed")
 }
 
-type countedDatastore struct {
-	storage.OpenFGADatastore
-	closes atomic.Int32
-}
-
-func (store *countedDatastore) Close() {
-	store.closes.Add(1)
-	store.OpenFGADatastore.Close()
-}
-
-func TestServerRejectsMissingDatastore(t *testing.T) {
-	server, err := NewOpenfgaServer(context.Background(), instrumentationtest.New().ToProviderSettings(), authz.Config{}, nil, nil, nil)
-	require.Error(t, err)
-	require.Nil(t, server)
-}
-
-func TestServerFailedStartReleasesResourcesWithoutClosingSharedPool(t *testing.T) {
-	for _, stage := range []string{"store", "model"} {
-		t.Run(stage, func(t *testing.T) {
-			ctx := context.Background()
-			store := newSharedSQLStore(t)
-			if stage == "model" {
-				// Store initialization succeeds, but the model tables are missing.
-				_, err := store.SQLDB().ExecContext(ctx, `CREATE TABLE store (
-					id TEXT PRIMARY KEY, name TEXT, created_at DATETIME,
-					updated_at DATETIME, deleted_at DATETIME)`)
-				require.NoError(t, err)
-			}
-			datastore, err := NewSQLStore(store, authz.Config{})
-			require.NoError(t, err)
-			counted := &countedDatastore{OpenFGADatastore: datastore}
-			server, err := NewOpenfgaServer(ctx, instrumentationtest.New().ToProviderSettings(), authz.Config{}, store,
-				[]transformer.ModuleFile{{Name: "test.fga", Contents: "module base\ntype user"}}, counted)
-			require.NoError(t, err)
-			t.Cleanup(func() { require.NoError(t, server.Stop(ctx)) })
-
-			err = server.Start(ctx)
-			require.Error(t, err)
-			require.EqualValues(t, 1, counted.closes.Load(), "failed initialization must release OpenFGA resources")
-			select {
-			case <-server.Healthy():
-				t.Fatal("failed server must not become healthy")
-			default:
-			}
-			require.NoError(t, server.Stop(ctx))
-			require.EqualValues(t, 1, counted.closes.Load())
-			require.NoError(t, store.SQLDB().PingContext(ctx))
-		})
+func TestBorrowedDatastoreCanCloseAndRecreateWithoutClosingSharedPool(t *testing.T) {
+	store := realSharedSQLStore(t)
+	for i := 0; i < 3; i++ {
+		datastore, err := NewSQLStore(store, authz.Config{})
+		require.NoError(t, err)
+		datastore.Close()
+		datastore.Close()
+		_, err = store.SQLDB().Exec("INSERT INTO shutdown_snapshot VALUES (?)", fmt.Sprint(i))
+		require.NoError(t, err)
 	}
+	var count int
+	require.NoError(t, store.SQLDB().QueryRow("SELECT count(*) FROM shutdown_snapshot").Scan(&count))
+	require.Equal(t, 3, count)
 }
 
-func TestServerStopReleasesOwnedDatastoreOnce(t *testing.T) {
-	for _, started := range []bool{false, true} {
-		name := "before_start"
-		if started {
-			name = "after_start"
-		}
-		t.Run(name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			// The server must still close datastores it owns, unlike the borrowed
-			// SQLite adapter. Exercise real OpenFGA caches and datastore cleanup.
-			datastore := &countedDatastore{OpenFGADatastore: memory.New()}
-			server, err := NewOpenfgaServer(ctx, instrumentationtest.New().ToProviderSettings(), authz.Config{}, nil,
-				[]transformer.ModuleFile{{Name: "test.fga", Contents: "module base\ntype user"}}, datastore)
-			require.NoError(t, err)
-			t.Cleanup(func() { require.NoError(t, server.Stop(ctx)) })
-
-			startResult := make(chan error, 1)
-			if started {
-				go func() { startResult <- server.Start(ctx) }()
-				select {
-				case <-server.Healthy():
-				case err := <-startResult:
-					t.Fatalf("server failed to start: %v", err)
-				case <-ctx.Done():
-					t.Fatal(ctx.Err())
-				}
-			}
-
-			var wg sync.WaitGroup
-			for range 4 {
-				wg.Go(func() { _ = server.Stop(ctx) })
-			}
-			wg.Wait()
-			require.EqualValues(t, 1, datastore.closes.Load())
-			if started {
-				select {
-				case err := <-startResult:
-					require.NoError(t, err)
-				case <-ctx.Done():
-					t.Fatal(ctx.Err())
-				}
-			}
-		})
+func TestBorrowedDatastoreDoesNotRegisterOwnedPoolMetrics(t *testing.T) {
+	store := realSharedSQLStore(t)
+	registry := prometheus.NewRegistry()
+	previousRegisterer, previousGatherer := prometheus.DefaultRegisterer, prometheus.DefaultGatherer
+	prometheus.DefaultRegisterer, prometheus.DefaultGatherer = registry, registry
+	t.Cleanup(func() {
+		prometheus.DefaultRegisterer, prometheus.DefaultGatherer = previousRegisterer, previousGatherer
+	})
+	for i := 0; i < 2; i++ {
+		datastore, err := NewSQLStore(store, authz.Config{})
+		require.NoError(t, err)
+		metrics, err := registry.Gather()
+		require.NoError(t, err)
+		require.Empty(t, metrics, "borrowed datastore must not acquire a DBStatsCollector that needs Close cleanup")
+		datastore.Close()
 	}
+	metrics, err := registry.Gather()
+	require.NoError(t, err)
+	require.Empty(t, metrics)
+}
+
+type storeWithUnsupportedDialect struct {
+	sqlstore.SQLStore
+	bunDB *bun.DB
+}
+
+func (store storeWithUnsupportedDialect) BunDB() *bun.DB { return store.bunDB }
+
+func TestFailedInitializationDoesNotCloseSharedPool(t *testing.T) {
+	t.Run("unsupported store", func(t *testing.T) {
+		store := realSharedSQLStore(t)
+		_, err := NewSQLStore(storeWithUnsupportedDialect{SQLStore: store, bunDB: bun.NewDB(store.SQLDB(), pgdialect.New())}, authz.Config{})
+		require.Error(t, err)
+		require.NoError(t, store.SQLDB().Ping())
+	})
+	t.Run("startup failure", func(t *testing.T) {
+		store := realSharedSQLStore(t)
+		server := sharedSQLServer(t, store)
+		// No OpenFGA schema was created: startup fails after constructing the
+		// server and its caches, and the normal cleanup path must remain safe.
+		require.Error(t, server.Start(context.Background()))
+		require.NoError(t, server.Stop(context.Background()))
+		require.NoError(t, server.Stop(context.Background()))
+		_, err := store.SQLDB().Exec("INSERT INTO shutdown_snapshot VALUES (?)", "startup failed")
+		require.NoError(t, err)
+	})
+}
+
+func TestServerStopIsConcurrentAndIdempotent(t *testing.T) {
+	store := realSharedSQLStore(t)
+	server := sharedSQLServer(t, store)
+	var stops sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		stops.Add(1)
+		go func() {
+			defer stops.Done()
+			require.NoError(t, server.Stop(context.Background()))
+		}()
+	}
+	stops.Wait()
+	require.NoError(t, store.SQLDB().Ping())
 }

@@ -20,22 +20,19 @@ func NewSQLStore(store sqlstore.SQLStore, config authz.Config) (storage.OpenFGAD
 		if err != nil {
 			return nil, err
 		}
-		return &borrowedSQLiteDatastore{Datastore: datastore}, nil
+		return &borrowedSQLDatastore{OpenFGADatastore: datastore}, nil
+
 	}
 	return nil, errors.Newf(errors.TypeInvalidInput, errors.CodeInvalidInput, "invalid store type: %s", store.BunDB().Dialect().Name().String())
 }
 
-// borrowedSQLiteDatastore leaves the platform-owned pool available to other
-// services, including their final shutdown writes. The platform closes it only
-// after all consumers have stopped.
-type borrowedSQLiteDatastore struct {
-	*sqlite.Datastore
+// borrowedSQLDatastore leaves the platform SQLStore responsible for its pool.
+// OpenFGA v1.14.1 SQLite Close only unregisters its optional DBStatsCollector and
+// closes the supplied pool. ExportMetrics is disabled above, so there are no
+// datastore-owned resources to release. Recheck that contract on dependency
+// upgrades; the full OpenFGA server still releases its own caches and workers.
+type borrowedSQLDatastore struct {
+	storage.OpenFGADatastore
 }
 
-// Close deliberately does not call sqlite.Datastore.Close: in OpenFGA v1.14.1
-// that method only unregisters its optional DB stats collector and closes the
-// pool. ExportMetrics must remain false above, so there is no datastore-owned
-// resource to release here. Revisit this adapter when upgrading OpenFGA or
-// enabling datastore metrics. OpenFGA Server.Close still releases its own caches,
-// planner and throttlers. Repeated calls to this borrowed-store Close are safe.
-func (*borrowedSQLiteDatastore) Close() {}
+func (*borrowedSQLDatastore) Close() {}

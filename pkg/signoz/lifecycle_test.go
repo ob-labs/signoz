@@ -106,7 +106,12 @@ func TestStopClosesSQLStoreAfterServices(t *testing.T) {
 					t.Fatal("shutdown did not finish")
 				}
 			}
-			require.NoError(t, <-consumerResult)
+			select {
+			case err := <-consumerResult:
+				require.NoError(t, err)
+			case <-ctx.Done():
+				t.Fatal("consumer did not finish its final SQL query")
+			}
 			require.Equal(t, int32(1), stopCalls.Load())
 			require.ErrorContains(t, store.SQLDB().PingContext(ctx), "database is closed")
 			require.NoError(t, store.Mock().ExpectationsWereMet())

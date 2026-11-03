@@ -2,7 +2,6 @@ package signozapiserver
 
 import (
 	"context"
-	"net/http"
 
 	"github.com/SigNoz/signoz/pkg/alertmanager"
 	"github.com/SigNoz/signoz/pkg/apiserver"
@@ -331,19 +330,7 @@ func newProvider(
 	httpHandler := middleware.NewCors().Wrap(router)
 	httpHandler = middleware.NewCompress().Wrap(httpHandler)
 
-	routePrefix := globalConfig.ExternalPath()
-	if routePrefix != "" {
-		prefixed := http.StripPrefix(routePrefix, httpHandler)
-		httpHandler = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-			switch req.URL.Path {
-			case "/api/v1/health", "/api/v2/healthz", "/api/v2/readyz", "/api/v2/livez":
-				router.ServeHTTP(w, req)
-				return
-			}
-
-			prefixed.ServeHTTP(w, req)
-		})
-	}
+	httpHandler = withExternalPath(router, httpHandler, globalConfig.ExternalPath())
 
 	httpServer, err := httpserver.New(settings.Logger(), config.Config, httpHandler)
 	if err != nil {

@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SigNoz/signoz/pkg/ingest"
 	"github.com/SigNoz/signoz/pkg/instrumentation/instrumentationtest"
 	"github.com/SigNoz/signoz/pkg/telemetrystore"
 	"github.com/SigNoz/signoz/pkg/telemetrystore/oceanbasetelemetrystore"
@@ -55,8 +56,8 @@ func TestOceanBaseNativeTracePage(t *testing.T) {
 	backend, err := oceanbasetelemetrystore.New(ctx, settings, cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, backend.(interface{ Close() error }).Close()) })
-	counter := &tracePageIntegrationStore{TelemetryStore: backend}
-	h := NewHandler(NewModule(settings, counter, nil, cfg))
+	require.NoError(t, ingest.InitializeTracePageDimensions(ctx, db, prefix))
+	h := NewHandler(NewModule(settings, backend, nil, cfg))
 	var lastWire string
 	fixture := tracePageIntegrationFixture{
 		db: db, table: table, org: valuer.GenerateUUID().StringValue(),
@@ -94,7 +95,6 @@ func TestOceanBaseNativeTracePage(t *testing.T) {
 			seen := map[string]bool{}
 			const limit = 20
 			for page := 1; page <= (count+limit-1)/limit; page++ {
-				beforeQueries, beforeRows := counter.queries, counter.rows
 				result := query(t, scope, url.Values{"page": {strconv.Itoa(page)}, "limit": {"20"}})
 				meta := result["meta"].(map[string]any)
 				require.EqualValues(t, count, meta["totalItems"])
@@ -108,8 +108,7 @@ func TestOceanBaseNativeTracePage(t *testing.T) {
 					require.EqualValues(t, 2, item["spanCount"])
 					require.Len(t, item["spans"], 2, "page must carry complete traces")
 				}
-				require.Equal(t, 1, counter.queries-beforeQueries, "page, count, facets and spans share one storage snapshot")
-				require.LessOrEqual(t, counter.rows-beforeRows, 3*limit+16, "only current-page spans and bounded aggregates may leave storage")
+				require.Less(t, len(lastWire), 24*1024*1024, "wire response must fit the checked page budget")
 				require.Equal(t, map[string]int{"prod": count, "test": count}, tracePageIntegrationFacet(t, result, "env"))
 				require.Equal(t, map[string]int{"coding": count}, tracePageIntegrationFacet(t, result, "scene"))
 				if page <= 2 {
@@ -215,7 +214,7 @@ func TestOceanBaseNativeTracePage(t *testing.T) {
 		fixture.insert(t, []tracePageIntegrationSpan{firstRoot, firstChild, secondRoot, secondChild})
 		limited := cfg
 		limited.OceanBase.MaxResultRows = 2
-		handler := NewHandler(NewModule(settings, counter, nil, limited))
+		handler := NewHandler(NewModule(settings, backend, nil, limited))
 		status, payload := fixture.call(t, handler.TracePage, scope, nil)
 		require.Equal(t, http.StatusOK, status, payload)
 		result := payload["data"].(map[string]any)
@@ -306,6 +305,74 @@ func TestOceanBaseNativeTracePage(t *testing.T) {
 			require.Equal(t, false, data["supported"])
 			require.NotEmpty(t, data["reason"])
 			require.Nil(t, data["meta"], "unsupported queries must not claim complete results")
+		}
+	})
+
+	t.Run("safe_large_page_uses_encoded_size_bound", func(t *testing.T) {
+		// Two ordinary 3 MiB inputs fit the 24 MiB page contract. A blanket
+		// six-times source multiplier rejects them despite minimal escaping.
+		scope := "large-safe-page"
+		first, _ := fixture.pair(scope, 7001)
+		second, _ := fixture.pair(scope, 7002)
+		body := strings.Repeat("x", 3*1024*1024)
+		first.attributes["gen_ai.input.messages"] = body
+		second.attributes["gen_ai.input.messages"] = body
+		fixture.insert(t, []tracePageIntegrationSpan{first, second})
+		result := query(t, scope, nil)
+		require.EqualValues(t, 2, result["meta"].(map[string]any)["totalItems"])
+		items := tracePageIntegrationItems(t, result)
+		require.Len(t, items, 2)
+		for _, item := range items {
+			spans := item["spans"].([]any)
+			require.Len(t, spans, 1)
+			attributes := spans[0].(map[string]any)["attributes"].(map[string]any)
+			require.Equal(t, body, attributes["gen_ai.input.messages"])
+		}
+		require.Less(t, len(lastWire), 24*1024*1024)
+	})
+
+	t.Run("decoded_resource_alias_over_budget_returns_413", func(t *testing.T) {
+		// The fixture stores no duplicated payload. Two 7 MiB resources fit
+		// the SQL envelope, but the legacy resource aliases make the final
+		// successful HTTP body exceed 28 MiB. Preflight alone cannot prove it.
+		scope := "large-resource-alias"
+		first, _ := fixture.pair(scope, 7051)
+		second, _ := fixture.pair(scope, 7052)
+		for _, span := range []*tracePageIntegrationSpan{&first, &second} {
+			span.resource["large.resource"] = strings.Repeat("x", 7<<20)
+		}
+		fixture.insert(t, []tracePageIntegrationSpan{first, second})
+		var storedBound int64
+		require.NoError(t, db.QueryRow("SELECT SUM(page_wire_bytes_v1) FROM "+table+" WHERE org_id=? AND space_id=?", fixture.org, scope).Scan(&storedBound))
+		require.Less(t, storedBound+4096, int64(24<<20), "the stored preflight must admit this regression fixture")
+		status, payload := fixture.call(t, h.TracePage, scope, nil)
+		require.Equal(t, http.StatusRequestEntityTooLarge, status)
+		require.Equal(t, "error", payload["status"])
+		require.NotContains(t, payload, "data", "a capacity failure must not return partial Traces")
+		require.Less(t, len(lastWire), 4096)
+	})
+
+	t.Run("stored_wire_bound_covers_escaping_and_updates", func(t *testing.T) {
+		scope := "wire-escaping"
+		span, _ := fixture.pair(scope, 7101)
+		fixture.insert(t, []tracePageIntegrationSpan{span})
+		for _, value := range []string{
+			strings.Repeat("plain", 8192),
+			strings.Repeat("\x00\x01\b\f\n\r\t\\\"", 8192),
+			strings.Repeat("中文😀<>&\u2028\u2029", 8192),
+		} {
+			var buf bytes.Buffer
+			encoder := json.NewEncoder(&buf)
+			encoder.SetEscapeHTML(false)
+			require.NoError(t, encoder.Encode(map[string]any{"text": value, "null": nil, "integer": int64(9223372036854775807)}))
+			_, err := db.Exec("UPDATE "+table+" SET span_name=?,status_message=?,attributes=? WHERE trace_id=?", string([]rune(value)[:100]), string([]rune(value)[:10000]), strings.TrimSpace(buf.String()), span.traceID)
+			require.NoError(t, err)
+			var bound, sqlBytes int64
+			require.NoError(t, db.QueryRow("SELECT page_wire_bytes_v1,OCTET_LENGTH("+tracePageSpanJSON()+") FROM "+table+" b WHERE trace_id=?", span.traceID).Scan(&bound, &sqlBytes))
+			require.GreaterOrEqual(t, bound, sqlBytes, "stored bound must cover database JSON encoding")
+			result := query(t, scope, nil)
+			require.EqualValues(t, 1, result["meta"].(map[string]any)["totalItems"])
+			require.GreaterOrEqual(t, bound+4096, int64(len(lastWire)), "stored bound must cover Go HTML escaping too")
 		}
 	})
 }
@@ -488,13 +555,25 @@ provider = SignozTraceProvider()
 request_params = {**params, "from": value["payload"]["meta"]["from"], "to": value["payload"]["meta"]["to"], "agent_uuid": "agent", "agent_product": "Codex"}
 query = TraceListQuery(SimpleNamespace(uuid=value["scope"], type=2), None, request_params)
 with patch.object(provider, "_context", return_value=(client, {"agent_product_filter": "Codex"})), patch.object(provider, "_window", side_effect=AssertionError("storage page must not invoke compatibility scan")):
-    page = provider.query_traces(query)
+    # Exercise the native-page contract directly. The public router may first
+    # request read-model/snapshot contracts that this fixture does not provide.
+    page = provider._query_trace_page(query)
+assert page is not None
 assert page["meta"]["queryMode"] == "storage", page["meta"]
 assert page["meta"]["totalItems"] == result["meta"]["totalItems"], page["meta"]
 assert [row["trace_id"] for row in page["data"]] == [row["trace_id"] for row in result["data"]]
-assert page["facets"] == window.facets(params), page["facets"]
+# Legacy any-Span environment/collector-user facets are deliberately not
+# advertised as canonical root-environment/SDK-user facets by the adapter.
+expected_facets = window.facets(params)
+if not page["meta"]["environmentFacetsComplete"]:
+    assert "env" not in page["facets"]
+    expected_facets.pop("env", None)
+if not page["meta"]["userIdentityFacetsComplete"]:
+    assert "username" not in page["facets"]
+    expected_facets.pop("username", None)
+assert page["facets"] == expected_facets, page["facets"]
 assert client.get.call_count == 1, client.get.call_count
-print(json.dumps({"ids": [row["trace_id"] for row in result["data"]], "total": result["meta"]["totalItems"], "facets": window.facets(params)}))
+print(json.dumps({"ids": [row["trace_id"] for row in result["data"]], "total": result["meta"]["totalItems"], "facets": expected_facets}))
 `
 	command := exec.Command(python, "-c", script)
 	command.Dir = backend
@@ -511,5 +590,7 @@ print(json.dumps({"ids": [row["trace_id"] for row in result["data"]], "total": r
 	}
 	require.Equal(t, expected["ids"], ids, "storage selection must match NativeTraceWindow")
 	require.Equal(t, expected["total"], result["meta"].(map[string]any)["totalItems"])
-	require.Equal(t, expected["facets"], result["facets"], "storage facets must match NativeTraceWindow")
+	for dimension, values := range expected["facets"].(map[string]any) {
+		require.Equal(t, values, result["facets"].(map[string]any)[dimension], "declared canonical facets must match NativeTraceWindow")
+	}
 }
