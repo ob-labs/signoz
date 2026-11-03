@@ -11,56 +11,19 @@ on:
     types:
       - checks_requested
 
+# These local frontend suites are retained for the upstream repository only.
+# The downstream headless image is qualified by goci/query and its image workflow.
+# Removed reusable app workflows required OIDC during validation, even for skipped jobs.
+permissions:
+  contents: read
+
 jobs:
-  tsc:
-    if: |
-      github.event_name == 'merge_group' ||
-      (github.event_name == 'pull_request' && ! github.event.pull_request.head.repo.fork && github.event.pull_request.user.login != 'dependabot[bot]' && ! contains(github.event.pull_request.labels.*.name, 'safe-to-test')) ||
-      (github.event_name == 'pull_request_target' && contains(github.event.pull_request.labels.*.name, 'safe-to-test'))
-    uses: signoz/primus.workflows/.github/workflows/js-tsc.yaml@main
-    secrets: inherit
-    with:
-      PRIMUS_REF: main
-      JS_SRC: frontend
-      JS_PKG_MANAGER: pnpm
-  test:
-    if: |
-      github.event_name == 'merge_group' ||
-      (github.event_name == 'pull_request' && ! github.event.pull_request.head.repo.fork && github.event.pull_request.user.login != 'dependabot[bot]' && ! contains(github.event.pull_request.labels.*.name, 'safe-to-test')) ||
-      (github.event_name == 'pull_request_target' && contains(github.event.pull_request.labels.*.name, 'safe-to-test'))
-    uses: signoz/primus.workflows/.github/workflows/js-test.yaml@main
-    secrets: inherit
-    with:
-      PRIMUS_REF: main
-      JS_SRC: frontend
-      JS_PKG_MANAGER: pnpm
-  fmt:
-    if: |
-      github.event_name == 'merge_group' ||
-      (github.event_name == 'pull_request' && ! github.event.pull_request.head.repo.fork && github.event.pull_request.user.login != 'dependabot[bot]' && ! contains(github.event.pull_request.labels.*.name, 'safe-to-test')) ||
-      (github.event_name == 'pull_request_target' && contains(github.event.pull_request.labels.*.name, 'safe-to-test'))
-    uses: signoz/primus.workflows/.github/workflows/js-fmt.yaml@main
-    secrets: inherit
-    with:
-      PRIMUS_REF: main
-      JS_SRC: frontend
-      JS_PKG_MANAGER: pnpm
-  lint:
-    if: |
-      github.event_name == 'merge_group' ||
-      (github.event_name == 'pull_request' && ! github.event.pull_request.head.repo.fork && github.event.pull_request.user.login != 'dependabot[bot]' && ! contains(github.event.pull_request.labels.*.name, 'safe-to-test')) ||
-      (github.event_name == 'pull_request_target' && contains(github.event.pull_request.labels.*.name, 'safe-to-test'))
-    uses: signoz/primus.workflows/.github/workflows/js-lint.yaml@main
-    secrets: inherit
-    with:
-      PRIMUS_REF: main
-      JS_SRC: frontend
-      JS_PKG_MANAGER: pnpm
   openapi:
     if: |
-      github.event_name == 'merge_group' ||
+      github.repository == 'SigNoz/signoz' &&
+      (github.event_name == 'merge_group' ||
       (github.event_name == 'pull_request' && ! github.event.pull_request.head.repo.fork && github.event.pull_request.user.login != 'dependabot[bot]' && ! contains(github.event.pull_request.labels.*.name, 'safe-to-test')) ||
-      (github.event_name == 'pull_request_target' && contains(github.event.pull_request.labels.*.name, 'safe-to-test'))
+      (github.event_name == 'pull_request_target' && contains(github.event.pull_request.labels.*.name, 'safe-to-test')))
     runs-on: ubuntu-latest
     steps:
       - name: self-checkout
@@ -81,9 +44,10 @@ jobs:
           git diff --compact-summary --exit-code || (echo; echo "Unexpected difference in generated api clients. Run pnpm generate:api in frontend/ locally and commit."; exit 1)
   storybook:
     if: |
-      github.event_name == 'merge_group' ||
+      github.repository == 'SigNoz/signoz' &&
+      (github.event_name == 'merge_group' ||
       (github.event_name == 'pull_request' && ! github.event.pull_request.head.repo.fork && github.event.pull_request.user.login != 'dependabot[bot]' && ! contains(github.event.pull_request.labels.*.name, 'safe-to-test')) ||
-      (github.event_name == 'pull_request_target' && contains(github.event.pull_request.labels.*.name, 'safe-to-test'))
+      (github.event_name == 'pull_request_target' && contains(github.event.pull_request.labels.*.name, 'safe-to-test')))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     container:
@@ -111,9 +75,10 @@ jobs:
         run: cd frontend && pnpm test:storybook --shard=${{ matrix.shard }}/${{ strategy.job-total }}
   web-settings:
     if: |
-      github.event_name == 'merge_group' ||
+      github.repository == 'SigNoz/signoz' &&
+      (github.event_name == 'merge_group' ||
       (github.event_name == 'pull_request' && ! github.event.pull_request.head.repo.fork && github.event.pull_request.user.login != 'dependabot[bot]' && ! contains(github.event.pull_request.labels.*.name, 'safe-to-test')) ||
-      (github.event_name == 'pull_request_target' && contains(github.event.pull_request.labels.*.name, 'safe-to-test'))
+      (github.event_name == 'pull_request_target' && contains(github.event.pull_request.labels.*.name, 'safe-to-test')))
     runs-on: ubuntu-latest
     steps:
       - name: self-checkout
