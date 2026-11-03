@@ -7,16 +7,24 @@ on:
     types:
       - synchronize
 
+# Trusted event metadata only: no checkout or execution of PR-controlled code.
+permissions:
+  pull-requests: write
+
 jobs:
   remove:
-    # Downstream review labels are reapplied manually for each reviewed head.
-    # Do not require the upstream Primus app or inherit its credentials here.
     if: |
-      github.repository == 'SigNoz/signoz' &&
-      (github.event.pull_request.head.repo.fork || github.event.pull_request.user.login == 'dependabot[bot]')
-    uses: signoz/primus.workflows/.github/workflows/github-label.yaml@main
-    secrets: inherit
-    with:
-      PRIMUS_REF: main
-      GITHUB_LABEL_ACTION: remove
-      GITHUB_LABEL_NAME: safe-to-test
+      contains(github.event.pull_request.labels.*.name, 'safe-to-test') &&
+      (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Clear review label after a new external head
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          gh api --method DELETE "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/safe-to-test" > /dev/null

@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "status": "pending",
+  "source_repository": "ob-labs/signoz",
+  "tool_version": "2.13.2",
+  "reason": "A reviewed uncapped Linux CI report must be explicitly recorded before the lint gate can pass. CI cannot accept its own findings."
+}

@@ -10,7 +10,9 @@ events. Merge queue checks remain enabled.
 External PRs run the broad Go jobs only when a maintainer applies `safe-to-test`
 to the reviewed head. This uses the ordinary `pull_request: labeled` event;
 there is no `pull_request_target` execution path. After an external PR head
-changes, remove and reapply the label to approve the new head. Other label events
+changes, the metadata-only `postci.yaml` clears the label; reapply it only after
+reviewing the new head. If that cleanup has not run, remove and reapply it manually.
+Other label events
 and a pre-existing label on a synchronize event do not authorize another run.
 The `pull_request` branch filter applies to `main` for both internal and external
 PRs.
@@ -34,10 +36,17 @@ fixtures. They also check the no-secret checkout contract and image receipt
 validation. They are not a local GitHub Actions executor.
 
 For this downstream headless fork, `goci.yaml` and the path-filtered
-`aivision-query-ci.yaml` are the maintained source checks. Primus-backed
-frontend jobs in `jsci.yaml` and the Primus label-removal job in `postci.yaml`
-are limited to `SigNoz/signoz`; applying a downstream review label cannot start
-those credential-bearing jobs. Their upstream behavior is preserved.
+`aivision-query-ci.yaml` are the maintained source checks. The four inherited
+Primus frontend calls have been removed from `jsci.yaml`: GitHub validates their
+nested OIDC permission demand before evaluating a false job condition, so an
+upstream-only `if` cannot make those calls usable here. No OIDC grant is added.
+The retained local frontend suites are explicitly upstream-only and do not
+establish downstream frontend validation.
+
+`postci.yaml` uses a repository-scoped `pull-requests: write` token only to clear
+an external/bot PR's review label after its head changes. It reads trusted event
+metadata without checkout or execution of PR-controlled code, inherited app
+credentials, or OIDC. PR-code jobs remain read-only.
 
 Other inherited frontend, commit, integration, and e2e suites are retained.
 Their `pull_request_target` local steps check out the base by default, so their
@@ -45,6 +54,38 @@ results do not demonstrate validation of the current PR head. They are not
 acceptance evidence for the headless image, OceanBase runtime, or AI Vision
 product combination. This change does not migrate those suites or upstream
 release workflows to downstream ownership.
+
+## Historical lint baseline
+
+The pinned linter scans the whole repository with the checked-in configuration
+and uncapped findings. The accepted bootstrap policy is **no new lint debt**,
+not zero historical findings. `.github/lint-baseline.json` records the approved
+existing findings from a specific Linux CI source/run/attempt, tool version and
+configuration hash. It is not a directory exclusion or changed-lines filter.
+
+CI rejects new or changed findings, additional occurrences of an existing
+finding, invalid reports, type-check/infrastructure errors, and tool/configuration
+drift. Source anchors are hashed; line relocation alone does not introduce a new
+finding. Resolved/stale entries are reported. A missing or pending baseline fails
+the gate, and CI never records or refreshes the baseline automatically.
+
+After verifying an actual CI report and obtaining maintainer authorization,
+record the frozen report locally with its exact source SHA and workflow identity:
+
+```sh
+python3 .github/scripts/lint_baseline.py record \
+  --report /absolute/path/to/lint-static-findings.json \
+  --baseline .github/lint-baseline.json \
+  --source-sha ACTUAL_SOURCE_SHA --run-id ACTUAL_RUN_ID \
+  --run-attempt ACTUAL_ATTEMPT --acknowledge-existing-findings
+```
+
+Review and commit the resulting baseline as evidence of accepted historical debt.
+Do not refresh it merely to make a failing PR green. The command is forbidden in
+GitHub Actions. The `lint-static-findings-<run_id>-<attempt>` artifact contains only
+normalized static findings and a typed gate summary, without raw source lines,
+compiler/runtime logs or environment dumps. Generated OpenAPI drift separately
+retains the actual spec only after its generator succeeds.
 
 ## Source-owned signoz-ob image
 

@@ -79,12 +79,50 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      - name: go-lint
+      - name: Install the pinned full-source linter
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.13.2
-          args: --timeout=10m
+          install-only: true
           skip-cache: true
+      - name: Collect the complete static lint report
+        id: lint-report
+        shell: bash
+        run: |
+          set -euo pipefail
+          golangci-lint version --json > "$RUNNER_TEMP/lint-tool.json"
+          go env -json GOVERSION GOOS GOARCH > "$RUNNER_TEMP/lint-go.json"
+          set +e
+          golangci-lint run --timeout=10m --max-same-issues=0 --max-issues-per-linter=0 \
+            --uniq-by-line=false --issues-exit-code=0 --output.json.path="$RUNNER_TEMP/lint-raw.json"
+          status=$?
+          printf '%s\n' "$status" > "$RUNNER_TEMP/lint-exit-code.txt"
+          exit "$status"
+      - name: Normalize static findings without source lines or runtime logs
+        if: always()
+        run: |
+          python3 .github/scripts/lint_baseline.py normalize \
+            --raw "$RUNNER_TEMP/lint-raw.json" --exit-code "$RUNNER_TEMP/lint-exit-code.txt" \
+            --tool-info "$RUNNER_TEMP/lint-tool.json" --go-info "$RUNNER_TEMP/lint-go.json" \
+            --config .golangci.yml --source-sha "$(git rev-parse HEAD)" \
+            --output "$RUNNER_TEMP/lint-public/lint-static-findings.json"
+      - name: Block unreviewed or newly introduced lint findings
+        if: always()
+        run: |
+          python3 .github/scripts/lint_baseline.py check \
+            --report "$RUNNER_TEMP/lint-public/lint-static-findings.json" \
+            --baseline .github/lint-baseline.json \
+            --summary "$RUNNER_TEMP/lint-public/lint-baseline-summary.json"
+      - name: Retain only normalized static-analysis evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-static-findings-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/lint-public/lint-static-findings.json
+            ${{ runner.temp }}/lint-public/lint-baseline-summary.json
+          if-no-files-found: error
+          retention-days: 7
   deps:
     if: |
       github.event_name == 'merge_group' ||
@@ -180,9 +218,19 @@ jobs:
           go-version-file: go.mod
           cache: false
       - name: generate-openapi
+        id: generate-openapi
+        run: go run ./cmd/community generate openapi
+      - name: Check tracked OpenAPI output
         run: |
-          go run ./cmd/community generate openapi
           git diff --compact-summary --exit-code || (echo; echo "Unexpected difference in openapi spec. Run go run ./cmd/community generate openapi locally and commit."; exit 1)
+      - name: Retain successful generated OpenAPI output when drift fails
+        if: ${{ failure() && steps.generate-openapi.conclusion == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-openapi-${{ github.run_id }}-${{ github.run_attempt }}
+          path: docs/api/openapi.yml
+          if-no-files-found: error
+          retention-days: 7
   authz:
     if: |
       github.event_name == 'merge_group' ||

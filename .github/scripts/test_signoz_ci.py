@@ -94,23 +94,27 @@ class GoCIConditionsTest(unittest.TestCase):
             self.assertFalse(allows(expression, "pull_request", same_repository=True, actor="dependabot[bot]"))
             self.assertFalse(allows(expression, "pull_request_target", same_repository=True, labels=("safe-to-test",)))
 
-    def test_downstream_label_cannot_start_inherited_credential_jobs(self):
-        guarded = []
+    def test_downstream_workflows_do_not_reference_upstream_credential_jobs(self):
+        # Reusable workflow permissions are validated before a false job `if`.
+        # Retaining the Primus calls breaks startup even when they cannot run.
         for filename in ("jsci.yaml", "postci.yaml"):
             text = (ROOT / ".github/workflows" / filename).read_text()
-            blocks = re.findall(r"^  ([a-z-]+):\n(.*?)(?=^  [a-z-]+:\n|\Z)", text, re.M | re.S)
-            for job, block in blocks:
-                if "secrets: inherit" not in block:
-                    continue
-                guarded.append((filename, job))
-                expression = re.search(r"^    if: (?:\|\n((?:      .+\n)+)|([^\n]+))", block, re.M)
-                self.assertIsNotNone(expression, (filename, job))
-                value = expression.group(1) or expression.group(2)
-                with self.subTest(filename=filename, job=job):
-                    self.assertFalse(allows(value, "pull_request_target", labels=("safe-to-test",)))
-                    self.assertFalse(allows(value, "pull_request", same_repository=True, fork=False))
-                    self.assertTrue(allows(value, "pull_request_target", labels=("safe-to-test",), repository="SigNoz/signoz"))
-        self.assertEqual(5, len(guarded))
+            with self.subTest(filename=filename):
+                self.assertNotIn("signoz/primus", text.lower())
+                self.assertNotIn("secrets: inherit", text)
+                self.assertNotIn("id-token:", text)
+
+    def test_label_cleanup_has_no_pr_code_execution(self):
+        text = (ROOT / ".github/workflows/postci.yaml").read_text()
+        self.assertIn("pull-requests: write", text)
+        self.assertNotIn("actions/checkout", text)
+        self.assertNotIn("contents: write", text)
+        self.assertIn("- synchronize", text)
+        expression = re.search(r"^    if: \|\n((?:      .+\n)+)", text, re.M).group(1)
+        self.assertTrue(allows(expression, "pull_request_target", labels=("safe-to-test",)))
+        self.assertFalse(allows(expression, "pull_request_target", labels=()))
+        self.assertFalse(allows(expression, "pull_request_target", same_repository=True, labels=("safe-to-test",)))
+        self.assertTrue(allows(expression, "pull_request_target", same_repository=True, actor="dependabot[bot]", labels=("safe-to-test",)))
 
     def test_pr_code_never_receives_privileged_credentials_or_shared_cache(self):
         text = GOCI.read_text()
