@@ -33,6 +33,8 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
+      - name: Repeat the OpenFGA startup and shutdown race regression
+        run: go test -race -count=20 -failfast ./pkg/authz/openfgaserver -run '^TestProviderStartStop$'
       - name: go-test
         run: go test -race ./...
   fmt:
