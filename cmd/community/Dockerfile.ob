@@ -22,6 +22,12 @@ FROM --platform=$BUILDPLATFORM golang:1.25-bookworm AS builder
 
 ARG TARGETOS
 ARG TARGETARCH
+# CI supplies these from the exact checked-out source and the build clock.
+# Defaults keep ordinary local docker builds usable without Git/CI metadata.
+ARG BUILD_VERSION=dev
+ARG BUILD_SHA=unknown
+ARG BUILD_TIMESTAMP=unknown
+ARG BUILD_REF=local
 # Override for networks where proxy.golang.org is unreachable, e.g.
 #   --build-arg GOPROXY=https://goproxy.cn,direct
 ARG GOPROXY=https://proxy.golang.org,direct
@@ -38,7 +44,13 @@ COPY pkg/ ./pkg/
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -trimpath -tags timetzdata -ldflags "-s -w" -o /out/signoz ./cmd/community
+    go build -trimpath -tags timetzdata -ldflags "-s -w \
+      -X github.com/SigNoz/signoz/pkg/version.version=${BUILD_VERSION} \
+      -X github.com/SigNoz/signoz/pkg/version.variant=community \
+      -X github.com/SigNoz/signoz/pkg/version.hash=${BUILD_SHA} \
+      -X github.com/SigNoz/signoz/pkg/version.time=${BUILD_TIMESTAMP} \
+      -X github.com/SigNoz/signoz/pkg/version.branch=${BUILD_REF}" \
+      -o /out/signoz ./cmd/community
 
 # Prepare the few directories required by SQLite and temporary-file users.
 # These commands run on BUILDPLATFORM, including when targeting arm64.

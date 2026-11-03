@@ -4,83 +4,184 @@ on:
   pull_request:
     branches:
       - main
-  pull_request_target:
-    types:
-      - labeled
+    types: [opened, synchronize, reopened, labeled]
   merge_group:
     types:
       - checks_requested
+
+# PR code is executed only with a read-only token and no inherited secrets;
+# Go and linter caches are disabled. The external-PR path is a safe-to-test label event;
+# a later head update requires removing and reapplying that label.
+permissions:
+  contents: read
 
 jobs:
   test:
     if: |
       github.event_name == 'merge_group' ||
-      (github.event_name == 'pull_request' && ! github.event.pull_request.head.repo.fork && github.event.pull_request.user.login != 'dependabot[bot]' && ! contains(github.event.pull_request.labels.*.name, 'safe-to-test')) ||
-      (github.event_name == 'pull_request_target' && contains(github.event.pull_request.labels.*.name, 'safe-to-test'))
-    uses: signoz/primus.workflows/.github/workflows/go-test.yaml@main
-    secrets: inherit
-    with:
-      PRIMUS_REF: main
-      GO_TEST_CONTEXT: ./...
-      GO_VERSION: 1.24
-  fmt:
-    if: |
-      github.event_name == 'merge_group' ||
-      (github.event_name == 'pull_request' && ! github.event.pull_request.head.repo.fork && github.event.pull_request.user.login != 'dependabot[bot]' && ! contains(github.event.pull_request.labels.*.name, 'safe-to-test')) ||
-      (github.event_name == 'pull_request_target' && contains(github.event.pull_request.labels.*.name, 'safe-to-test'))
-    uses: signoz/primus.workflows/.github/workflows/go-fmt.yaml@main
-    secrets: inherit
-    with:
-      PRIMUS_REF: main
-      GO_VERSION: 1.24
-  lint:
-    if: |
-      github.event_name == 'merge_group' ||
-      (github.event_name == 'pull_request' && ! github.event.pull_request.head.repo.fork && github.event.pull_request.user.login != 'dependabot[bot]' && ! contains(github.event.pull_request.labels.*.name, 'safe-to-test')) ||
-      (github.event_name == 'pull_request_target' && contains(github.event.pull_request.labels.*.name, 'safe-to-test'))
-    uses: signoz/primus.workflows/.github/workflows/go-lint.yaml@main
-    secrets: inherit
-    with:
-      PRIMUS_REF: main
-      GO_VERSION: 1.24
-  deps:
-    if: |
-      github.event_name == 'merge_group' ||
-      (github.event_name == 'pull_request' && ! github.event.pull_request.head.repo.fork && github.event.pull_request.user.login != 'dependabot[bot]' && ! contains(github.event.pull_request.labels.*.name, 'safe-to-test')) ||
-      (github.event_name == 'pull_request_target' && contains(github.event.pull_request.labels.*.name, 'safe-to-test'))
-    uses: signoz/primus.workflows/.github/workflows/go-deps.yaml@main
-    secrets: inherit
-    with:
-      PRIMUS_REF: main
-      GO_VERSION: 1.24
-  semconv-generated:
-    if: |
-      github.event_name == 'merge_group' ||
-      (github.event_name == 'pull_request' && ! github.event.pull_request.head.repo.fork && github.event.pull_request.user.login != 'dependabot[bot]' && ! contains(github.event.pull_request.labels.*.name, 'safe-to-test')) ||
-      (github.event_name == 'pull_request_target' && contains(github.event.pull_request.labels.*.name, 'safe-to-test'))
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]') ||
+      (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name == 'safe-to-test' && github.event.pull_request.head.repo.full_name != github.repository && contains(github.event.pull_request.labels.*.name, 'safe-to-test'))
     runs-on: ubuntu-latest
     steps:
       - name: self-checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
       - name: go-install
         uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version-file: go.mod
+          cache: false
+      - name: Repeat the OpenFGA startup and shutdown race regression
+        run: go test -race -count=20 -failfast ./pkg/authz/openfgaserver -run '^TestProviderStartStop$'
+      - name: go-test
+        run: go test -race ./...
+  fmt:
+    if: |
+      github.event_name == 'merge_group' ||
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]') ||
+      (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name == 'safe-to-test' && github.event.pull_request.head.repo.full_name != github.repository && contains(github.event.pull_request.labels.*.name, 'safe-to-test'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: self-checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: go-install
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: check-ci-contracts
+        run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
+      - name: go-fmt
+        shell: bash
+        run: |
+          unformatted=$(git ls-files -z '*.go' ':!:vendor/**' | xargs -0 gofmt -l)
+          if [[ -n "$unformatted" ]]; then
+            printf '%s\n' "$unformatted"
+            exit 1
+          fi
+  lint:
+    if: |
+      github.event_name == 'merge_group' ||
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]') ||
+      (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name == 'safe-to-test' && github.event.pull_request.head.repo.full_name != github.repository && contains(github.event.pull_request.labels.*.name, 'safe-to-test'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: self-checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: go-install
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Install the pinned full-source linter
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.2
+          install-only: true
+          skip-cache: true
+      - name: Collect the complete static lint report
+        id: lint-report
+        shell: bash
+        run: |
+          set -euo pipefail
+          golangci-lint version --json > "$RUNNER_TEMP/lint-tool.json"
+          go env -json GOVERSION GOOS GOARCH > "$RUNNER_TEMP/lint-go.json"
+          set +e
+          golangci-lint run --timeout=10m --max-same-issues=0 --max-issues-per-linter=0 \
+            --uniq-by-line=false --issues-exit-code=0 --output.json.path="$RUNNER_TEMP/lint-raw.json"
+          status=$?
+          printf '%s\n' "$status" > "$RUNNER_TEMP/lint-exit-code.txt"
+          exit "$status"
+      - name: Normalize static findings without source lines or runtime logs
+        if: always()
+        run: |
+          python3 .github/scripts/lint_baseline.py normalize \
+            --raw "$RUNNER_TEMP/lint-raw.json" --exit-code "$RUNNER_TEMP/lint-exit-code.txt" \
+            --tool-info "$RUNNER_TEMP/lint-tool.json" --go-info "$RUNNER_TEMP/lint-go.json" \
+            --config .golangci.yml --source-sha "$(git rev-parse HEAD)" \
+            --output "$RUNNER_TEMP/lint-public/lint-static-findings.json"
+      - name: Block unreviewed or newly introduced lint findings
+        if: always()
+        run: |
+          python3 .github/scripts/lint_baseline.py check \
+            --report "$RUNNER_TEMP/lint-public/lint-static-findings.json" \
+            --baseline .github/lint-baseline.json \
+            --summary "$RUNNER_TEMP/lint-public/lint-baseline-summary.json"
+      - name: Retain only normalized static-analysis evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-static-findings-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/lint-public/lint-static-findings.json
+            ${{ runner.temp }}/lint-public/lint-baseline-summary.json
+          if-no-files-found: error
+          retention-days: 7
+  deps:
+    if: |
+      github.event_name == 'merge_group' ||
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]') ||
+      (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name == 'safe-to-test' && github.event.pull_request.head.repo.full_name != github.repository && contains(github.event.pull_request.labels.*.name, 'safe-to-test'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: self-checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: go-install
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: go-deps
+        run: |
+          go mod tidy -diff
+          go mod verify
+  semconv-generated:
+    if: |
+      github.event_name == 'merge_group' ||
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]') ||
+      (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name == 'safe-to-test' && github.event.pull_request.head.repo.full_name != github.repository && contains(github.event.pull_request.labels.*.name, 'safe-to-test'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: self-checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: go-install
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
       - name: check-semconv-generated-files
         run: go run ./scripts/semconv -check
   build:
     if: |
       github.event_name == 'merge_group' ||
-      (github.event_name == 'pull_request' && ! github.event.pull_request.head.repo.fork && github.event.pull_request.user.login != 'dependabot[bot]' && ! contains(github.event.pull_request.labels.*.name, 'safe-to-test')) ||
-      (github.event_name == 'pull_request_target' && contains(github.event.pull_request.labels.*.name, 'safe-to-test'))
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]') ||
+      (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name == 'safe-to-test' && github.event.pull_request.head.repo.full_name != github.repository && contains(github.event.pull_request.labels.*.name, 'safe-to-test'))
     runs-on: ubuntu-latest
     steps:
       - name: self-checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
       - name: go-install
         uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version-file: go.mod
+          cache: false
       - name: qemu-install
         uses: docker/setup-qemu-action@v3
       - name: aarch64-install
@@ -92,6 +193,7 @@ jobs:
         uses: actions/setup-node@v5
         with:
           node-version: "22"
+          package-manager-cache: false
       - name: setup-pnpm
         uses: pnpm/action-setup@v6
         with:
@@ -103,33 +205,51 @@ jobs:
   openapi:
     if: |
       github.event_name == 'merge_group' ||
-      (github.event_name == 'pull_request' && ! github.event.pull_request.head.repo.fork && github.event.pull_request.user.login != 'dependabot[bot]' && ! contains(github.event.pull_request.labels.*.name, 'safe-to-test')) ||
-      (github.event_name == 'pull_request_target' && contains(github.event.pull_request.labels.*.name, 'safe-to-test'))
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]') ||
+      (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name == 'safe-to-test' && github.event.pull_request.head.repo.full_name != github.repository && contains(github.event.pull_request.labels.*.name, 'safe-to-test'))
     runs-on: ubuntu-latest
     steps:
       - name: self-checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
       - name: go-install
         uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version-file: go.mod
+          cache: false
       - name: generate-openapi
+        id: generate-openapi
+        run: go run ./cmd/community generate openapi
+      - name: Check tracked OpenAPI output
         run: |
-          go run ./cmd/community generate openapi
           git diff --compact-summary --exit-code || (echo; echo "Unexpected difference in openapi spec. Run go run ./cmd/community generate openapi locally and commit."; exit 1)
+      - name: Retain successful generated OpenAPI output when drift fails
+        if: ${{ failure() && steps.generate-openapi.conclusion == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-openapi-${{ github.run_id }}-${{ github.run_attempt }}
+          path: docs/api/openapi.yml
+          if-no-files-found: error
+          retention-days: 7
   authz:
     if: |
       github.event_name == 'merge_group' ||
-      (github.event_name == 'pull_request' && ! github.event.pull_request.head.repo.fork && github.event.pull_request.user.login != 'dependabot[bot]' && ! contains(github.event.pull_request.labels.*.name, 'safe-to-test')) ||
-      (github.event_name == 'pull_request_target' && contains(github.event.pull_request.labels.*.name, 'safe-to-test'))
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]') ||
+      (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name == 'safe-to-test' && github.event.pull_request.head.repo.full_name != github.repository && contains(github.event.pull_request.labels.*.name, 'safe-to-test'))
     runs-on: ubuntu-latest
     steps:
       - name: self-checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
       - name: go-install
         uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version-file: go.mod
+          cache: false
       - name: generate-authz
         run: |
           go run ./cmd/community generate authz
@@ -137,16 +257,20 @@ jobs:
   web-settings:
     if: |
       github.event_name == 'merge_group' ||
-      (github.event_name == 'pull_request' && ! github.event.pull_request.head.repo.fork && github.event.pull_request.user.login != 'dependabot[bot]' && ! contains(github.event.pull_request.labels.*.name, 'safe-to-test')) ||
-      (github.event_name == 'pull_request_target' && contains(github.event.pull_request.labels.*.name, 'safe-to-test'))
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]') ||
+      (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name == 'safe-to-test' && github.event.pull_request.head.repo.full_name != github.repository && contains(github.event.pull_request.labels.*.name, 'safe-to-test'))
     runs-on: ubuntu-latest
     steps:
       - name: self-checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
       - name: go-install
         uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version-file: go.mod
+          cache: false
       - name: generate-web-settings
         run: |
           go run ./cmd/community generate config web-settings
@@ -154,16 +278,20 @@ jobs:
   transaction-groups:
     if: |
       github.event_name == 'merge_group' ||
-      (github.event_name == 'pull_request' && ! github.event.pull_request.head.repo.fork && github.event.pull_request.user.login != 'dependabot[bot]' && ! contains(github.event.pull_request.labels.*.name, 'safe-to-test')) ||
-      (github.event_name == 'pull_request_target' && contains(github.event.pull_request.labels.*.name, 'safe-to-test'))
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]') ||
+      (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name == 'safe-to-test' && github.event.pull_request.head.repo.full_name != github.repository && contains(github.event.pull_request.labels.*.name, 'safe-to-test'))
     runs-on: ubuntu-latest
     steps:
       - name: self-checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
       - name: go-install
         uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version-file: go.mod
+          cache: false
       - name: generate-transaction-groups
         run: |
           go run ./cmd/community generate config transaction-groups

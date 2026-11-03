@@ -59,8 +59,8 @@ func NewPromRuleTask(name, file string, frequency time.Duration, rules []Rule, o
 		seriesInPreviousEval: make([]map[string]plabels.Labels, len(rules)),
 		done:                 make(chan struct{}),
 		terminated:           make(chan struct{}),
-		notify: notify,
-		logger: opts.Logger,
+		notify:               notify,
+		logger:               opts.Logger,
 	}
 }
 

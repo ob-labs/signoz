@@ -22,6 +22,7 @@ permissions:
   packages: write
 
 env:
+  IMAGE_PLATFORMS: linux/amd64,linux/arm64
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/signoz-ob
 
 jobs:
@@ -32,7 +33,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'release' && format('refs/tags/{0}', github.event.release.tag_name) || github.ref }}
+          # Bind both release and manual builds to the event's immutable commit.
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - id: source
+        name: Record checked-out build source
+        env:
+          BUILD_VERSION: ${{ github.event_name == 'release' && github.event.release.tag_name || format('sha-{0}', github.sha) }}
+        shell: bash
+        run: |
+          source_sha=$(git rev-parse HEAD)
+          test "$source_sha" = "$GITHUB_SHA"
+          printf 'sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
+          printf 'version=%s\n' "$BUILD_VERSION" >> "$GITHUB_OUTPUT"
+          printf 'timestamp=%s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -46,6 +61,12 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE_NAME }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.source.outputs.sha }}
+            org.opencontainers.image.version=${{ steps.source.outputs.version }}
+            org.opencontainers.image.created=${{ steps.source.outputs.timestamp }}
+          # SigNoz owns all aliases for this package, including latest/dev/daily.
           # Only published stable releases advance the latest alias.
           flavor: latest=false
           tags: |
@@ -56,15 +77,40 @@ jobs:
             type=raw,value=${{ inputs.tag }},enable=${{ inputs.tag != '' }}
             type=sha
 
-      - uses: docker/build-push-action@v6
+      - id: build
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: cmd/community/Dockerfile.ob
           # Go is cross-compiled inside the Dockerfile, so both platforms are
           # produced on one amd64 runner without QEMU.
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ env.IMAGE_PLATFORMS }}
+          build-args: |
+            BUILD_VERSION=${{ steps.source.outputs.version }}
+            BUILD_SHA=${{ steps.source.outputs.sha }}
+            BUILD_TIMESTAMP=${{ steps.source.outputs.timestamp }}
+            BUILD_REF=${{ github.ref }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Write source image build receipt
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          BUILD_VERSION: ${{ steps.source.outputs.version }}
+          BUILD_TIMESTAMP: ${{ steps.source.outputs.timestamp }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        shell: bash
+        run: |
+          docker buildx imagetools inspect "$IMAGE_NAME@$IMAGE_DIGEST" --raw > signoz-ob-image-index.json
+          python3 .github/scripts/signoz_ob_provenance.py --manifest signoz-ob-image-index.json --output signoz-ob-build-receipt.json
+
+      - name: Upload source image build receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: signoz-ob-build-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: signoz-ob-build-receipt.json
+          if-no-files-found: error
