@@ -18,7 +18,7 @@ func candidateTestRows(columns []cmock.ColumnType, data [][]any) telemetrystore.
 }
 
 func TestCandidateSpanHandlersUseOneQuery(t *testing.T) {
-	for _, kind := range []string{"mcp", "skill"} {
+	for _, kind := range []string{"mcp", "skill", "memory"} {
 		t.Run(kind, func(t *testing.T) {
 			store := &tracePageUnitStore{rows: candidateTestRows(
 				[]cmock.ColumnType{
@@ -37,6 +37,8 @@ func TestCandidateSpanHandlersUseOneQuery(t *testing.T) {
 			response := httptest.NewRecorder()
 			if kind == "mcp" {
 				handler.McpTools(response, request)
+			} else if kind == "memory" {
+				handler.MemorySpans(response, request)
 			} else {
 				handler.SkillSpans(response, request)
 			}
@@ -92,4 +94,12 @@ func TestCandidateEmptyPagesPreserveTotals(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMemoryPredicateKeepsMcpSeparate(t *testing.T) {
+	p := memorySpanPredicateSQL()
+	for _, token := range []string{"powercontext.client", "powercontext.server", "powercontext.operation.name", "prepare_context", "memory.search", "powercontext.operation.unit"} {
+		require.Contains(t, p, token)
+	}
+	require.NotContains(t, mcpToolPredicateSQL(), "powercontext")
 }

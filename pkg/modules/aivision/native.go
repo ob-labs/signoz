@@ -1499,3 +1499,21 @@ func outputTokenSumSQL() string {
 func totalTokenSumSQL() string {
 	return "SUM(" + totalTokenValueSQL() + ")"
 }
+
+// Memory candidates include MCP calls and provider-identified native operations.
+// Python verifies semantics and deduplicates layers after a complete bounded scan.
+func memorySpanPredicateSQL() string {
+	scope := traceAttributeTextSQL("aivision.otlp.scope.name")
+	operation := traceAttributeTextSQL("powercontext.operation.name")
+	unit := traceAttributeTextSQL("powercontext.operation.unit")
+	return "(" + mcpToolPredicateSQL() + " OR (" + scope + " IN ('powercontext.client','powercontext.server') AND ((" + operation + " = 'prepare_context' AND " + unit + " IN ('dependency','transport','application')) OR (" + operation + " = 'memory.search' AND " + unit + " = 'stage'))))"
+}
+
+func (store *oceanBaseStore) listMemorySpans(ctx context.Context, orgID string, params nativeListParams) (nativeSkillSpansResponse, error) {
+	where, args, err := nativeTraceWhere(orgID, params)
+	if err != nil {
+		return nativeSkillSpansResponse{}, err
+	}
+	where += " AND " + memorySpanPredicateSQL()
+	return store.listCandidateSpans(ctx, params, where, args)
+}

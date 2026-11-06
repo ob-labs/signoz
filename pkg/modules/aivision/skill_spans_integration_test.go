@@ -60,6 +60,26 @@ func TestOceanBaseSkillSpans(t *testing.T) {
 		return payload["data"].(map[string]any)
 	}
 
+	t.Run("memory_native_candidates_do_not_pollute_mcp", func(t *testing.T) {
+		native, _ := fixture.pair("memory-native", 1)
+		native.attributes = map[string]any{
+			"aivision.otlp.scope.name":    "powercontext.server",
+			"powercontext.operation.name": "prepare_context", "powercontext.operation.unit": "application",
+		}
+		unrelated, _ := fixture.pair("memory-unrelated", 1)
+		unrelated.attributes = map[string]any{"powercontext.operation.name": "prepare_context", "powercontext.operation.unit": "application"}
+		fixture.insert(t, []tracePageIntegrationSpan{native, unrelated})
+		status, payload := fixture.call(t, h.MemorySpans, "memory-native", nil)
+		require.Equal(t, http.StatusOK, status, payload)
+		require.EqualValues(t, 1, payload["data"].(map[string]any)["spanMeta"].(map[string]any)["totalItems"])
+		status, payload = fixture.call(t, h.McpTools, "memory-native", url.Values{"spans_only": {"true"}})
+		require.Equal(t, http.StatusOK, status, payload)
+		require.EqualValues(t, 0, payload["data"].(map[string]any)["spanMeta"].(map[string]any)["totalItems"])
+		status, payload = fixture.call(t, h.MemorySpans, "memory-unrelated", nil)
+		require.Equal(t, http.StatusOK, status, payload)
+		require.EqualValues(t, 0, payload["data"].(map[string]any)["spanMeta"].(map[string]any)["totalItems"])
+	})
+
 	t.Run("native_name_without_argument_path", func(t *testing.T) {
 		span, _ := fixture.pair("native-name", 1)
 		span.attributes = map[string]any{"agentic.skill.name": "deploy"}
