@@ -178,7 +178,7 @@ func TestOceanBaseTracePageDimensionsBackfillAndUpdate(t *testing.T) {
 		var raw string
 		var stored, actual, bound, encoded int64
 		require.NoError(t, db.QueryRow("SELECT page_dimensions_v1,page_source_bytes_v1,"+nativeSpanSourceBytesSQL()+",page_wire_bytes_v1,OCTET_LENGTH("+tracePageSpanJSON()+") FROM "+table+" b").Scan(&raw, &stored, &actual, &bound, &encoded))
-		require.Equal(t, actual, stored)
+		require.Equal(t, stored+nativeScopeSourceByteAllowance, actual)
 		require.GreaterOrEqual(t, bound, encoded)
 		var metadata map[string]any
 		require.NoError(t, json.Unmarshal([]byte(raw), &metadata))

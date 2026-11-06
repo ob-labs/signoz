@@ -53,6 +53,8 @@ const nativeSpanProjection = `trace_id,
 	end_time_unix_nano,
 	duration_nano,
 	service_name,
+	scope_name,
+	scope_version,
 	user_id,
 	space_id,
 	agent_product,
@@ -219,6 +221,24 @@ func normalizeNativeTimestamp(row map[string]any, key string) {
 }
 
 func normalizeNativeSpan(row map[string]any) {
+	// Standard OTLP scope identity is stored separately from application attrs.
+	// Prefer that provenance; retain historical flattened attrs only when absent.
+	if name, ok := row["scope_name"].(string); ok && name != "" {
+		attributes, ok := row["attributes"].(map[string]any)
+		if ok || row["attributes"] == nil {
+			if attributes == nil {
+				attributes = map[string]any{}
+				row["attributes"] = attributes
+			}
+			attributes["aivision.otlp.scope.name"] = name
+			delete(attributes, "aivision.otlp.scope.version")
+			if version, ok := row["scope_version"].(string); ok && version != "" {
+				attributes["aivision.otlp.scope.version"] = version
+			}
+		}
+	}
+	delete(row, "scope_name")
+	delete(row, "scope_version")
 	normalizeNativeTimestamp(row, "start_time_unix_nano")
 	normalizeNativeTimestamp(row, "end_time_unix_nano")
 
@@ -1498,4 +1518,37 @@ func outputTokenSumSQL() string {
 
 func totalTokenSumSQL() string {
 	return "SUM(" + totalTokenValueSQL() + ")"
+}
+
+// Memory candidates include MCP calls and provider-identified native operations.
+// Python verifies semantics and deduplicates layers after a complete bounded scan.
+func memoryMcpOwnerPredicateSQL() string {
+	toolType := traceAttributeTextSQL("agentic.tool.type")
+	spanKind := traceAttributeTextSQL("gen_ai.span.kind")
+	rawName := "COALESCE(NULLIF(TRIM(" + traceAttributeTextSQL("agentic.tool.raw_name") + "), ''), NULLIF(TRIM(" + traceAttributeTextSQL("gen_ai.tool.name") + "), ''))"
+	// Memory's adapter recognizes these explicit identities when assigning
+	// native child ownership. Preserve their spans without changing discovery.
+	return "(" + mcpToolPredicateSQL() + " OR LOWER(TRIM(" + toolType + ")) = 'mcp' OR UPPER(TRIM(" + spanKind + ")) = 'MCP' OR POSITION('mcp__' IN " + rawName + ") = 1)"
+}
+
+func memorySpanPredicateSQL() string {
+	scope := "COALESCE(NULLIF(scope_name, ''), " + traceAttributeTextSQL("aivision.otlp.scope.name") + ")"
+	operation := traceAttributeTextSQL("powercontext.operation.name")
+	unit := traceAttributeTextSQL("powercontext.operation.unit")
+	transport := traceAttributeTextSQL("powercontext.transport")
+	service := "(" + operation + " IN ('prepare_context','capture_content_source') AND " + unit + " IN ('dependency','transport','application'))"
+	search := "(" + operation + " = 'memory.search' AND " + unit + " = 'stage')"
+	// Retain an MCP bridge as ownership context, including SDK-only calls.
+	// It is not a native business call and does not widen MCP discovery.
+	mcpContext := "(" + scope + " = 'powercontext.server' AND " + unit + " = 'transport' AND " + transport + " = 'mcp')"
+	return "(" + memoryMcpOwnerPredicateSQL() + " OR (" + scope + " IN ('powercontext.client','powercontext.server') AND (" + service + " OR " + search + ")) OR " + mcpContext + ")"
+}
+
+func (store *oceanBaseStore) listMemorySpans(ctx context.Context, orgID string, params nativeListParams) (nativeSkillSpansResponse, error) {
+	where, args, err := nativeTraceWhere(orgID, params)
+	if err != nil {
+		return nativeSkillSpansResponse{}, err
+	}
+	where += " AND " + memorySpanPredicateSQL()
+	return store.listCandidateSpans(ctx, params, where, args)
 }

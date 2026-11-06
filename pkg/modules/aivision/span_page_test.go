@@ -18,7 +18,7 @@ func candidateTestRows(columns []cmock.ColumnType, data [][]any) telemetrystore.
 }
 
 func TestCandidateSpanHandlersUseOneQuery(t *testing.T) {
-	for _, kind := range []string{"mcp", "skill"} {
+	for _, kind := range []string{"mcp", "skill", "memory"} {
 		t.Run(kind, func(t *testing.T) {
 			store := &tracePageUnitStore{rows: candidateTestRows(
 				[]cmock.ColumnType{
@@ -35,9 +35,12 @@ func TestCandidateSpanHandlersUseOneQuery(t *testing.T) {
 				"user": {"subject-a"}, "agent_product": {"Codex"},
 			}, true)
 			response := httptest.NewRecorder()
-			if kind == "mcp" {
+			switch kind {
+			case "mcp":
 				handler.McpTools(response, request)
-			} else {
+			case "memory":
+				handler.MemorySpans(response, request)
+			default:
 				handler.SkillSpans(response, request)
 			}
 			require.Equal(t, http.StatusOK, response.Code, response.Body.String())
@@ -92,4 +95,13 @@ func TestCandidateEmptyPagesPreserveTotals(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMemoryPredicateKeepsMcpSeparate(t *testing.T) {
+	p := memorySpanPredicateSQL()
+	for _, token := range []string{"powercontext.client", "powercontext.server", "powercontext.operation.name", "prepare_context", "capture_content_source", "memory.search", "powercontext.operation.unit", "powercontext.transport", "gen_ai.span.kind", "gen_ai.tool.name", "mcp"} {
+		require.Contains(t, p, token)
+	}
+	require.NotContains(t, p, "resolve_scope_binding")
+	require.NotContains(t, mcpToolPredicateSQL(), "powercontext")
 }
