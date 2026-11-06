@@ -99,7 +99,7 @@ func TestCandidateEmptyPagesPreserveTotals(t *testing.T) {
 
 func TestMemoryPredicateKeepsMcpSeparate(t *testing.T) {
 	p := memorySpanPredicateSQL()
-	for _, token := range []string{"powercontext.client", "powercontext.server", "powercontext.operation.name", "prepare_context", "capture_content_source", "memory.search", "powercontext.operation.unit", "powercontext.transport", "mcp"} {
+	for _, token := range []string{"powercontext.client", "powercontext.server", "powercontext.operation.name", "prepare_context", "capture_content_source", "memory.search", "powercontext.operation.unit", "powercontext.transport", "gen_ai.span.kind", "gen_ai.tool.name", "mcp"} {
 		require.Contains(t, p, token)
 	}
 	require.NotContains(t, p, "resolve_scope_binding")

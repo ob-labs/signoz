@@ -1522,6 +1522,15 @@ func totalTokenSumSQL() string {
 
 // Memory candidates include MCP calls and provider-identified native operations.
 // Python verifies semantics and deduplicates layers after a complete bounded scan.
+func memoryMcpOwnerPredicateSQL() string {
+	toolType := traceAttributeTextSQL("agentic.tool.type")
+	spanKind := traceAttributeTextSQL("gen_ai.span.kind")
+	rawName := "COALESCE(NULLIF(TRIM(" + traceAttributeTextSQL("agentic.tool.raw_name") + "), ''), NULLIF(TRIM(" + traceAttributeTextSQL("gen_ai.tool.name") + "), ''))"
+	// Memory's adapter recognizes these explicit identities when assigning
+	// native child ownership. Preserve their spans without changing discovery.
+	return "(" + mcpToolPredicateSQL() + " OR LOWER(TRIM(" + toolType + ")) = 'mcp' OR UPPER(TRIM(" + spanKind + ")) = 'MCP' OR POSITION('mcp__' IN " + rawName + ") = 1)"
+}
+
 func memorySpanPredicateSQL() string {
 	scope := "COALESCE(NULLIF(scope_name, ''), " + traceAttributeTextSQL("aivision.otlp.scope.name") + ")"
 	operation := traceAttributeTextSQL("powercontext.operation.name")
@@ -1532,7 +1541,7 @@ func memorySpanPredicateSQL() string {
 	// Retain an MCP bridge as ownership context, including SDK-only calls.
 	// It is not a native business call and does not widen MCP discovery.
 	mcpContext := "(" + scope + " = 'powercontext.server' AND " + unit + " = 'transport' AND " + transport + " = 'mcp')"
-	return "(" + mcpToolPredicateSQL() + " OR (" + scope + " IN ('powercontext.client','powercontext.server') AND (" + service + " OR " + search + ")) OR " + mcpContext + ")"
+	return "(" + memoryMcpOwnerPredicateSQL() + " OR (" + scope + " IN ('powercontext.client','powercontext.server') AND (" + service + " OR " + search + ")) OR " + mcpContext + ")"
 }
 
 func (store *oceanBaseStore) listMemorySpans(ctx context.Context, orgID string, params nativeListParams) (nativeSkillSpansResponse, error) {

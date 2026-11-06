@@ -109,6 +109,43 @@ func TestOceanBaseNativeMemoryUsesStoredInstrumentationScope(t *testing.T) {
 	require.NoError(t, decoder.Decode(&pageRow))
 	require.NoError(t, decodeWindowSpan(pageRow))
 	require.Equal(t, "powercontext.server", pageRow["attributes"].(map[string]any)["aivision.otlp.scope.name"])
+
+	t.Run("memory_scan_retains_mcp_owner_context_without_widening_discovery", func(t *testing.T) {
+		markers := []map[string]any{
+			{"gen_ai.span.kind": "MCP", "agentic.tool.name": "powercontext.search_memory"},
+			{"gen_ai.tool.name": "mcp__powercontext__search_memory"},
+			{"agentic.tool.type": " MCP ", "agentic.tool.name": "powercontext.search_memory"},
+			{"agentic.tool.raw_name": "  mcp__powercontext__search_memory  "},
+			{"gen_ai.span.kind": "TOOL", "agentic.tool.name": "powercontext.search_memory"},
+		}
+		wantIDs := []string{}
+		for index, attributes := range markers {
+			owner, _ := fixture.pair("mcp-owner-space", 10+index)
+			owner.attributes = attributes
+			child, _ := fixture.pair("mcp-owner-space", 20+index)
+			child.traceID, child.parent = owner.traceID, owner.spanID
+			child.attributes = map[string]any{
+				"aivision.otlp.scope.name": "powercontext.client", "powercontext.operation.name": "prepare_context", "powercontext.operation.unit": "dependency",
+			}
+			fixture.insert(t, []tracePageIntegrationSpan{owner, child})
+			wantIDs = append(wantIDs, child.spanID)
+			if index < len(markers)-1 {
+				wantIDs = append(wantIDs, owner.spanID)
+			}
+		}
+		ownerParams := p
+		ownerParams.SpaceID = "mcp-owner-space"
+		observed, err := store.listMemorySpans(context.Background(), fixture.org, ownerParams)
+		require.NoError(t, err)
+		gotIDs := []string{}
+		for _, candidate := range observed.Spans {
+			gotIDs = append(gotIDs, candidate["span_id"].(string))
+		}
+		require.ElementsMatch(t, wantIDs, gotIDs, "explicit MCP owners must accompany native children; ordinary tools must stay excluded")
+		var discoveryCount int
+		require.NoError(t, db.QueryRow("SELECT COUNT(*) FROM "+table+" WHERE space_id=? AND "+mcpToolPredicateSQL(), "mcp-owner-space").Scan(&discoveryCount))
+		require.Zero(t, discoveryCount, "memory-only ownership context must not change MCP discovery")
+	})
 }
 
 func TestNativeScopeMetadataFitsReservedWireAllowance(t *testing.T) {
