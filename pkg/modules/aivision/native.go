@@ -1526,7 +1526,13 @@ func memorySpanPredicateSQL() string {
 	scope := "COALESCE(NULLIF(scope_name, ''), " + traceAttributeTextSQL("aivision.otlp.scope.name") + ")"
 	operation := traceAttributeTextSQL("powercontext.operation.name")
 	unit := traceAttributeTextSQL("powercontext.operation.unit")
-	return "(" + mcpToolPredicateSQL() + " OR (" + scope + " IN ('powercontext.client','powercontext.server') AND ((" + operation + " = 'prepare_context' AND " + unit + " IN ('dependency','transport','application')) OR (" + operation + " = 'memory.search' AND " + unit + " = 'stage'))))"
+	transport := traceAttributeTextSQL("powercontext.transport")
+	service := "(" + operation + " IN ('prepare_context','capture_content_source') AND " + unit + " IN ('dependency','transport','application'))"
+	search := "(" + operation + " = 'memory.search' AND " + unit + " = 'stage')"
+	// Retain an MCP bridge as ownership context, including SDK-only calls.
+	// It is not a native business call and does not widen MCP discovery.
+	mcpContext := "(" + scope + " = 'powercontext.server' AND " + unit + " = 'transport' AND " + transport + " = 'mcp')"
+	return "(" + mcpToolPredicateSQL() + " OR (" + scope + " IN ('powercontext.client','powercontext.server') AND (" + service + " OR " + search + ")) OR " + mcpContext + ")"
 }
 
 func (store *oceanBaseStore) listMemorySpans(ctx context.Context, orgID string, params nativeListParams) (nativeSkillSpansResponse, error) {

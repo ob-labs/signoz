@@ -65,7 +65,15 @@ func TestOceanBaseNativeMemoryUsesStoredInstrumentationScope(t *testing.T) {
 	fixture := tracePageIntegrationFixture{db: db, table: table, org: "scope-test", start: time.Now()}
 	root, _ := fixture.pair("scope-space", 1)
 	root.attributes = map[string]any{"powercontext.operation.name": "prepare_context", "powercontext.operation.unit": "application", "powercontext.operation.outcome": "success"}
-	fixture.insert(t, []tracePageIntegrationSpan{root})
+	capture, _ := fixture.pair("scope-space", 2)
+	capture.attributes = map[string]any{"powercontext.operation.name": "capture_content_source", "powercontext.operation.unit": "dependency"}
+	binding, _ := fixture.pair("scope-space", 3)
+	binding.attributes = map[string]any{"powercontext.operation.name": "resolve_scope_binding", "powercontext.operation.unit": "application"}
+	connector, _ := fixture.pair("scope-space", 4)
+	connector.attributes = map[string]any{"powercontext.operation.name": "mcp.tools.call", "powercontext.operation.unit": "transport", "powercontext.transport": "mcp"}
+	stage, _ := fixture.pair("scope-space", 5)
+	stage.attributes = map[string]any{"powercontext.operation.name": "memory.capture", "powercontext.operation.unit": "stage"}
+	fixture.insert(t, []tracePageIntegrationSpan{root, capture, binding, connector, stage})
 	_, err = db.Exec("UPDATE "+table+" SET scope_name=?,scope_version=?", "powercontext.server", "1.5.0")
 	require.NoError(t, err)
 	cfg := telemetrystore.NewConfigFactory().New().(telemetrystore.Config)
@@ -79,7 +87,12 @@ func TestOceanBaseNativeMemoryUsesStoredInstrumentationScope(t *testing.T) {
 	p := nativeListParams{From: fixture.start.Add(-time.Minute).UnixMilli(), To: fixture.start.Add(time.Minute).UnixMilli(), SpaceID: "scope-space", Page: 1, Limit: 50}
 	candidates, err := store.listMemorySpans(context.Background(), fixture.org, p)
 	require.NoError(t, err)
-	require.Len(t, candidates.Spans, 1, "standard OTLP scope must identify the actual native operation")
+	require.Len(t, candidates.Spans, 3, "recall/capture and MCP ownership context must survive the bounded native scan")
+	operations := []string{}
+	for _, candidate := range candidates.Spans {
+		operations = append(operations, candidate["attributes"].(map[string]any)["powercontext.operation.name"].(string))
+	}
+	require.ElementsMatch(t, []string{"prepare_context", "capture_content_source", "mcp.tools.call"}, operations)
 	require.Equal(t, "powercontext.server", candidates.Spans[0]["attributes"].(map[string]any)["aivision.otlp.scope.name"])
 	detail, err := store.getTraceDetail(context.Background(), fixture.org, root.traceID, p)
 	require.NoError(t, err)
