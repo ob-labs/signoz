@@ -35,11 +35,12 @@ func TestCandidateSpanHandlersUseOneQuery(t *testing.T) {
 				"user": {"subject-a"}, "agent_product": {"Codex"},
 			}, true)
 			response := httptest.NewRecorder()
-			if kind == "mcp" {
+			switch kind {
+			case "mcp":
 				handler.McpTools(response, request)
-			} else if kind == "memory" {
+			case "memory":
 				handler.MemorySpans(response, request)
-			} else {
+			default:
 				handler.SkillSpans(response, request)
 			}
 			require.Equal(t, http.StatusOK, response.Code, response.Body.String())

@@ -21,17 +21,18 @@ func TestNativeScopeMetadataSurvivesNormalizedReadPaths(t *testing.T) {
 		t.Run(path, func(t *testing.T) {
 			attrs := map[string]any{"powercontext.operation.name": "prepare_context", "aivision.otlp.scope.name": "unrelated"}
 			span := map[string]any{"scope_name": "powercontext.server", "scope_version": "1.5.0", "attributes": attrs}
-			if path == "page" {
+			switch path {
+			case "page":
 				rows := tracePageTestRows(t)
 				raw := rows[2]["result"].(map[string]any)["spans"].([]any)[0].(map[string]any)
 				raw["scope_name"], raw["scope_version"] = "powercontext.server", "1.5.0"
 				result, err := decodeTracePage(rows, nativeListParams{Page: 1, Limit: 20, SpaceID: "space-a"})
 				require.NoError(t, err)
 				span = result.(map[string]any)["data"].([]tracePageItem)[0].Spans[0]
-			} else if path == "source" {
+			case "source":
 				require.NoError(t, decodeWindowSpan(span))
 				require.NoError(t, compactNativeSpan(span))
-			} else {
+			default:
 				normalizeNativeSpan(span)
 			}
 			normalized := span["attributes"].(map[string]any)
@@ -61,7 +62,10 @@ func TestOceanBaseNativeMemoryUsesStoredInstrumentationScope(t *testing.T) {
 	table := "`" + prefix + "_traces`"
 	_, err = db.Exec("CREATE TABLE " + table + " LIKE signoz_traces")
 	require.NoError(t, err)
-	defer db.Exec("DROP TABLE " + table)
+	defer func() {
+		_, dropErr := db.Exec("DROP TABLE " + table)
+		require.NoError(t, dropErr)
+	}()
 	fixture := tracePageIntegrationFixture{db: db, table: table, org: "scope-test", start: time.Now()}
 	root, _ := fixture.pair("scope-space", 1)
 	root.attributes = map[string]any{"powercontext.operation.name": "prepare_context", "powercontext.operation.unit": "application", "powercontext.operation.outcome": "success"}
