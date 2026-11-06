@@ -11,6 +11,12 @@ import (
 const traceSpanSourceByteLimit = 16 * 1024 * 1024
 const traceWindowSourceByteLimit = 512 * 1024 * 1024
 
+// Each stored scope field is VARCHAR(255): at most 1020 UTF-8 bytes or
+// 1530 JSON-escaped bytes. Reserve a separate bound for both fields and keys,
+// including normalization into attrs, without changing persisted byte columns.
+const nativeScopeSourceByteAllowance = 4096
+const nativeScopeWireByteAllowance = 4096
+
 // All variable-width fields selected by nativeSpanProjection participate,
 // including status_message. Numeric values and JSON framing fit the additional
 // per-row allowance. Raw source bytes and escaped response bytes have separate
@@ -21,7 +27,7 @@ func nativeSpanSourceBytesSQL() string {
 	for _, column := range columns {
 		parts = append(parts, "OCTET_LENGTH(COALESCE("+column+",''))")
 	}
-	return "(" + strings.Join(parts, "+") + "+2048)"
+	return "(" + strings.Join(parts, "+") + "+" + fmt.Sprint(2048+nativeScopeSourceByteAllowance) + ")"
 }
 
 func scanReadModelRowsEach(ctx context.Context, tx *sql.Tx, query string, args []any, consume func(map[string]any) error) error {

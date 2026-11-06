@@ -642,7 +642,7 @@ func buildTracePageSQL(table, org string, p nativeListParams, maxSpanCount int) 
 	// them once per statement instead of repeating the metadata scan/extraction.
 	// Metadata preflight bounds its input; raw Span JSON stays outside the CTE.
 	query := `WITH base AS (
-SELECT /*+ MATERIALIZE */ t.trace_id,t.span_id,t.start_time_unix_nano,t.end_time_unix_nano,t.status_code,` + ingest.TracePageWireBytesColumn + ` AS wire_bytes,
+SELECT /*+ MATERIALIZE */ t.trace_id,t.span_id,t.start_time_unix_nano,t.end_time_unix_nano,t.status_code,` + ingest.TracePageWireBytesColumn + ` + ` + fmt.Sprint(nativeScopeWireByteAllowance) + ` AS wire_bytes,
 ` + compact("space") + ` AS scope_space,` + pageText(compact("agent")) + ` AS scope_agent,
 ` + compact("env") + ` AS env_json,` + compact("scene") + ` AS scene_json,
 ` + compact("resource_username") + ` AS resource_username,` + compact("attribute_username") + ` AS attribute_username,
@@ -702,7 +702,7 @@ UNION ALL SELECT 2,p.page_rank,p.trace_id,0,'','trace',JSON_OBJECT('traceId',p.t
 
 func tracePageSpanJSON() string {
 	parts := []string{}
-	for _, column := range []string{"trace_id", "span_id", "parent_span_id", "span_name", "span_kind", "status_code", "status_message", "start_time_unix_nano", "end_time_unix_nano", "duration_nano", "service_name", "user_id", "space_id", "agent_product", "session_id", "resource_attributes", "attributes", "events", "links", "payload"} {
+	for _, column := range []string{"trace_id", "span_id", "parent_span_id", "span_name", "span_kind", "status_code", "status_message", "start_time_unix_nano", "end_time_unix_nano", "duration_nano", "service_name", "scope_name", "scope_version", "user_id", "space_id", "agent_product", "session_id", "resource_attributes", "attributes", "events", "links", "payload"} {
 		key, expr := column, "b."+column
 		if column == "span_name" {
 			key = "name"

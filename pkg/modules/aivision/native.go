@@ -53,6 +53,8 @@ const nativeSpanProjection = `trace_id,
 	end_time_unix_nano,
 	duration_nano,
 	service_name,
+	scope_name,
+	scope_version,
 	user_id,
 	space_id,
 	agent_product,
@@ -219,6 +221,24 @@ func normalizeNativeTimestamp(row map[string]any, key string) {
 }
 
 func normalizeNativeSpan(row map[string]any) {
+	// Standard OTLP scope identity is stored separately from application attrs.
+	// Prefer that provenance; retain historical flattened attrs only when absent.
+	if name, ok := row["scope_name"].(string); ok && name != "" {
+		attributes, ok := row["attributes"].(map[string]any)
+		if ok || row["attributes"] == nil {
+			if attributes == nil {
+				attributes = map[string]any{}
+				row["attributes"] = attributes
+			}
+			attributes["aivision.otlp.scope.name"] = name
+			delete(attributes, "aivision.otlp.scope.version")
+			if version, ok := row["scope_version"].(string); ok && version != "" {
+				attributes["aivision.otlp.scope.version"] = version
+			}
+		}
+	}
+	delete(row, "scope_name")
+	delete(row, "scope_version")
 	normalizeNativeTimestamp(row, "start_time_unix_nano")
 	normalizeNativeTimestamp(row, "end_time_unix_nano")
 
@@ -1503,7 +1523,7 @@ func totalTokenSumSQL() string {
 // Memory candidates include MCP calls and provider-identified native operations.
 // Python verifies semantics and deduplicates layers after a complete bounded scan.
 func memorySpanPredicateSQL() string {
-	scope := traceAttributeTextSQL("aivision.otlp.scope.name")
+	scope := "COALESCE(NULLIF(scope_name, ''), " + traceAttributeTextSQL("aivision.otlp.scope.name") + ")"
 	operation := traceAttributeTextSQL("powercontext.operation.name")
 	unit := traceAttributeTextSQL("powercontext.operation.unit")
 	return "(" + mcpToolPredicateSQL() + " OR (" + scope + " IN ('powercontext.client','powercontext.server') AND ((" + operation + " = 'prepare_context' AND " + unit + " IN ('dependency','transport','application')) OR (" + operation + " = 'memory.search' AND " + unit + " = 'stage'))))"
