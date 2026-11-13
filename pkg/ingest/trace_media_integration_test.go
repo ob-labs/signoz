@@ -69,7 +69,9 @@ func TestOceanBaseTraceMediaTransactionAndBoundary(t *testing.T) {
 			t.Fatal(err)
 		}
 		if _, err := persistProjectedTraceAttribute(ctx, tx, prefix, scope, "output.value", raw); err != nil {
-			tx.Rollback()
+			if rollbackErr := tx.Rollback(); rollbackErr != nil {
+				t.Errorf("rollback: %v", rollbackErr)
+			}
 			t.Fatal(err)
 		}
 		if err := tx.Commit(); err != nil {
@@ -104,7 +106,9 @@ func TestOceanBaseTraceMediaTransactionAndBoundary(t *testing.T) {
 	}
 	prepared, err := prepareTraceMediaRows(ctx, tx, prefix, rows)
 	if err != nil {
-		tx.Rollback()
+		if rollbackErr := tx.Rollback(); rollbackErr != nil {
+			t.Errorf("rollback: %v", rollbackErr)
+		}
 		t.Fatal(err)
 	}
 	if strings.Contains(fmt.Sprint(prepared[0][22]), "JVBERi") || strings.Contains(fmt.Sprint(prepared[0][25]), "JVBERi") || strings.Contains(fmt.Sprint(prepared[0][22]), "forged") {
@@ -117,7 +121,9 @@ func TestOceanBaseTraceMediaTransactionAndBoundary(t *testing.T) {
 	if _, ok := obj[MediaOriginalsAttribute].(map[string]any); !ok {
 		t.Fatal("missing trusted restoration marker")
 	}
-	tx.Rollback()
+	if rollbackErr := tx.Rollback(); rollbackErr != nil {
+		t.Errorf("rollback: %v", rollbackErr)
+	}
 	// Fill only this isolated space, then verify admission rejects both a
 	// new file and reactivation of an expired record at full active quota.
 	for i := 0; i < 4; i++ {
@@ -125,7 +131,9 @@ func TestOceanBaseTraceMediaTransactionAndBoundary(t *testing.T) {
 		other.span = fmt.Sprintf("%016x", i+10)
 		tx, _ := db.BeginTx(ctx, nil)
 		if _, err := persistProjectedTraceAttribute(ctx, tx, prefix, other, "output.value", raw); err != nil {
-			tx.Rollback()
+			if rollbackErr := tx.Rollback(); rollbackErr != nil {
+				t.Errorf("rollback: %v", rollbackErr)
+			}
 			t.Fatal(err)
 		}
 		if err := tx.Commit(); err != nil {
@@ -138,6 +146,8 @@ func TestOceanBaseTraceMediaTransactionAndBoundary(t *testing.T) {
 	if _, err := persistProjectedTraceAttribute(ctx, tx, prefix, other, "output.value", raw); err == nil || !strings.Contains(err.Error(), "quota") {
 		t.Fatalf("quota not enforced: %v", err)
 	}
-	tx.Rollback()
+	if rollbackErr := tx.Rollback(); rollbackErr != nil {
+		t.Errorf("rollback: %v", rollbackErr)
+	}
 
 }

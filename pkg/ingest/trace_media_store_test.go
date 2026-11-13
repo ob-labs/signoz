@@ -5,7 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
-	"errors"
+	"github.com/SigNoz/signoz/pkg/errors"
 	"regexp"
 	"strings"
 	"testing"
@@ -30,7 +30,7 @@ func TestPersistTraceMediaUsesCallerTransactionAndPropagatesFailure(t *testing.T
 	scope := mediaScope{"org", "space", "agent", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", "output"}
 	query := "INSERT INTO `test_trace_media` (id,org_id,space_id,agent_id,trace_id,span_id,direction,mime_type,sha256,content) VALUES (?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE created_at=CURRENT_TIMESTAMP(6)"
 	expectMediaQuota(mock)
-	mock.ExpectExec(regexp.QuoteMeta(query)).WithArgs(sqlmock.AnyArg(), "org", "space", "agent", scope.trace, scope.span, "output", media.MIME, media.SHA256, data).WillReturnError(errors.New("storage failure"))
+	mock.ExpectExec(regexp.QuoteMeta(query)).WithArgs(sqlmock.AnyArg(), "org", "space", "agent", scope.trace, scope.span, "output", media.MIME, media.SHA256, data).WillReturnError(errors.NewInternalf(errors.CodeInternal, "storage failure"))
 	mock.ExpectRollback()
 	if id, err := persistTraceMedia(context.Background(), tx, "test", scope, media); err == nil || id != "" {
 		t.Fatal("failed write must not return a reference")
@@ -58,7 +58,7 @@ func TestPersistProjectedAttributeDoesNotReturnUnrecoverableReference(t *testing
 	raw := `{"type":"file","mime_type":"application/pdf","data":"` + base64.StdEncoding.EncodeToString([]byte("%PDF-example")) + `"}`
 	expectMediaQuota(mock)
 	mock.ExpectExec("INSERT INTO `test_trace_media`").WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("INSERT INTO `test_trace_media_original`").WillReturnError(errors.New("original failed"))
+	mock.ExpectExec("INSERT INTO `test_trace_media_original`").WillReturnError(errors.NewInternalf(errors.CodeInternal, "original failed"))
 	mock.ExpectRollback()
 	if value, err := persistProjectedTraceAttribute(context.Background(), tx, "test", scope, "output.value", raw); err == nil || value != "" {
 		t.Fatal("original failure must not return a reference")
@@ -187,7 +187,7 @@ func TestOriginalAndAttachmentRollbackTogether(t *testing.T) {
 	scope := mediaScope{"org", "space", "agent", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", "output"}
 	expectMediaQuota(mock)
 	mock.ExpectExec("INSERT INTO `test_trace_media`").WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec("INSERT INTO `test_trace_media_original`").WillReturnError(errors.New("original failed"))
+	mock.ExpectExec("INSERT INTO `test_trace_media_original`").WillReturnError(errors.NewInternalf(errors.CodeInternal, "original failed"))
 	mock.ExpectRollback()
 	if _, err := persistTraceMedia(context.Background(), tx, "test", scope, media); err != nil {
 		t.Fatal(err)

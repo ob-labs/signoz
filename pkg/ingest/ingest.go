@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SigNoz/signoz/pkg/errors"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gorilla/mux"
 	"go.opentelemetry.io/collector/pdata/plog"
@@ -342,7 +343,7 @@ func (ep *endpoint) insertRows(ctx context.Context, table, columns, upsert strin
 	if table == ep.tracesTable && columns == spanInsertColumns {
 		rows, err = prepareTraceMediaRows(ctx, tx, ep.cfg.TablePrefix, rows)
 		if err != nil {
-			return fmt.Errorf("prepare trace media: %w", err)
+			return errors.WrapInternalf(err, errors.CodeInternal, "prepare trace media")
 		}
 	}
 	stmt, err := tx.PrepareContext(ctx, "INSERT INTO "+table+columns+upsert)

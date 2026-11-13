@@ -5,7 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
-	"fmt"
+	"github.com/SigNoz/signoz/pkg/errors"
 	"regexp"
 	"time"
 )
@@ -23,14 +23,14 @@ var mediaSpanID = regexp.MustCompile(`^[0-9a-f]{16}$`)
 // transaction. A reference is returned only after the database accepts it.
 func persistTraceMedia(ctx context.Context, tx *sql.Tx, prefix string, scope mediaScope, media traceMedia) (string, error) {
 	if !tablePrefixPattern.MatchString(prefix) || scope.org == "" || scope.space == "" || scope.agent == "" || !mediaTraceID.MatchString(scope.trace) || !mediaSpanID.MatchString(scope.span) || (scope.direction != "input" && scope.direction != "output") {
-		return "", fmt.Errorf("invalid trace media scope")
+		return "", errors.NewInvalidInputf(errors.CodeInvalidInput, "invalid trace media scope")
 	}
 	if len(media.Data) == 0 || len(media.Data) > 16<<20 || !validTraceMedia(media.MIME, media.Data) {
-		return "", fmt.Errorf("invalid trace media content")
+		return "", errors.NewInvalidInputf(errors.CodeInvalidInput, "invalid trace media content")
 	}
 	hash := sha256.Sum256(media.Data)
 	if media.SHA256 != hex.EncodeToString(hash[:]) {
-		return "", fmt.Errorf("trace media digest mismatch")
+		return "", errors.NewInvalidInputf(errors.CodeInvalidInput, "trace media digest mismatch")
 	}
 	// The scope is part of the identifier so identical bytes in two spaces or
 	// spans never become a cross-tenant capability.
@@ -48,12 +48,12 @@ func persistTraceMedia(ctx context.Context, tx *sql.Tx, prefix string, scope med
 			return "", err
 		}
 		if used+int64(len(media.Data)) > 100<<20 {
-			return "", fmt.Errorf("trace media space quota exceeded")
+			return "", errors.NewInvalidInputf(errors.CodeInvalidInput, "trace media space quota exceeded")
 		}
 	}
 	query := "INSERT INTO " + tableName(prefix, "trace_media") + " (id,org_id,space_id,agent_id,trace_id,span_id,direction,mime_type,sha256,content) VALUES (?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE created_at=CURRENT_TIMESTAMP(6)"
 	if _, err := tx.ExecContext(ctx, query, id, scope.org, scope.space, scope.agent, scope.trace, scope.span, scope.direction, media.MIME, media.SHA256, media.Data); err != nil {
-		return "", fmt.Errorf("store trace media: %w", err)
+		return "", errors.WrapInternalf(err, errors.CodeInternal, "store trace media")
 	}
 	return id, nil
 }
@@ -62,14 +62,14 @@ func persistTraceMedia(ctx context.Context, tx *sql.Tx, prefix string, scope med
 // keyed by the projection digest as a span can be re-sent with changed input.
 func persistTraceMediaOriginal(ctx context.Context, tx *sql.Tx, prefix string, scope mediaScope, attribute, projected, original string) error {
 	if !tablePrefixPattern.MatchString(prefix) || scope.org == "" || scope.space == "" || scope.agent == "" || !mediaTraceID.MatchString(scope.trace) || !mediaSpanID.MatchString(scope.span) || attribute == "" || len(attribute) > 255 || projected == "" || original == "" {
-		return fmt.Errorf("invalid trace media original")
+		return errors.NewInvalidInputf(errors.CodeInvalidInput, "invalid trace media original")
 	}
 	hash := sha256.Sum256([]byte(projected))
 	projectionDigest := hex.EncodeToString(hash[:])
 	id := traceMediaOriginalID(scope, attribute, projected, original)
 	query := "INSERT INTO " + tableName(prefix, "trace_media_original") + " (id,org_id,space_id,agent_id,trace_id,span_id,attribute_key,projected_sha256,original) VALUES (?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE id=VALUES(id)"
 	if _, err := tx.ExecContext(ctx, query, id, scope.org, scope.space, scope.agent, scope.trace, scope.span, attribute, projectionDigest, []byte(original)); err != nil {
-		return fmt.Errorf("store trace media original: %w", err)
+		return errors.WrapInternalf(err, errors.CodeInternal, "store trace media original")
 	}
 	return nil
 }
@@ -107,7 +107,7 @@ func StoreTraceMedia(ctx context.Context, db *sql.DB, prefix, org, space, agent,
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	scope := mediaScope{org, space, agent, trace, span, direction}
 	id, err := persistTraceMedia(ctx, tx, prefix, scope, traceMedia{mime, hex.EncodeToString(hash[:]), content})
 	if err != nil {

@@ -46,7 +46,7 @@ func (h *handler) TraceMediaWrite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.MultipartForm != nil {
-		defer r.MultipartForm.RemoveAll()
+		defer func() { _ = r.MultipartForm.RemoveAll() }()
 	}
 	trace, span, direction := r.FormValue("trace_id"), r.FormValue("span_id"), r.FormValue("direction")
 	if !mediaTraceID.MatchString(trace) || !mediaSpanID.MatchString(span) || (direction != "input" && direction != "output") {

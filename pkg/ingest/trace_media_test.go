@@ -3,8 +3,8 @@ package ingest
 import (
 	"bytes"
 	"encoding/base64"
-	"errors"
 	"fmt"
+	"github.com/SigNoz/signoz/pkg/errors"
 	"strings"
 	"testing"
 )
@@ -63,7 +63,7 @@ func TestProjectTraceMediaPreservesOrderNumbersAndErrors(t *testing.T) {
 	if err != nil || !strings.Contains(projected, `9007199254740993`) || !strings.Contains(projected, `"id":"attachment"`) || strings.Contains(projected, b64) {
 		t.Fatalf("projection: %s %v", projected, err)
 	}
-	expected := errors.New("storage failed")
+	expected := errors.NewInternalf(errors.CodeInternal, "storage failed")
 	if _, err := projectTraceMedia(raw, 16<<20, func(m traceMedia) (string, error) { return "", expected }); !errors.Is(err, expected) {
 		t.Fatal("storage error was lost")
 	}

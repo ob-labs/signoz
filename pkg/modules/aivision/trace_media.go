@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SigNoz/signoz/pkg/errors"
 	"github.com/SigNoz/signoz/pkg/ingest"
 	"github.com/gorilla/mux"
 )
@@ -43,17 +44,17 @@ func (s *oceanBaseStore) restoreTraceMedia(ctx context.Context, org string, span
 		for key, value := range pointers {
 			id, ok := value.(string)
 			if !ok || !traceMediaID.MatchString(id) {
-				return fmt.Errorf("invalid media original reference")
+				return errors.NewInvalidInputf(errors.CodeInvalidInput, "invalid media original reference")
 			}
 			projected, ok := attrs[key].(string)
 			if !ok {
-				return fmt.Errorf("invalid projected media attribute")
+				return errors.NewInvalidInputf(errors.CodeInvalidInput, "invalid projected media attribute")
 			}
 			hash := sha256.Sum256([]byte(projected))
 			var original []byte
 			err := s.db.QueryRowContext(ctx, "SELECT original FROM "+s.readModelTable("trace_media_original")+" WHERE id=? AND org_id=? AND space_id=? AND agent_id=? AND trace_id=? AND span_id=? AND attribute_key=? AND projected_sha256=?", id, org, span["space_id"], resource["aivision.agent.id"], span["trace_id"], span["span_id"], key, hex.EncodeToString(hash[:])).Scan(&original)
 			if err != nil {
-				return fmt.Errorf("media original unavailable: %w", err)
+				return errors.WrapInternalf(err, errors.CodeInternal, "media original unavailable")
 			}
 			attrs[key] = string(original)
 			if payload, ok := span["payload"].(map[string]any); ok {
@@ -203,7 +204,7 @@ func (h *handler) TraceMedia(w http.ResponseWriter, r *http.Request) {
 		h.writeBackendError(w, err)
 		return
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	m, err := h.backend.traceMediaMetadataFrom(ctx, tx, org, id, p)
 	if err != nil {
 		h.writeBackendError(w, err)

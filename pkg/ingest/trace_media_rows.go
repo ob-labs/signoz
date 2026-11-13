@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"github.com/SigNoz/signoz/pkg/errors"
 	"sort"
 	"strings"
 )
@@ -19,7 +20,7 @@ var mediaDirections = map[string]string{
 func decodeMediaObject(raw any) (map[string]any, error) {
 	text, ok := raw.(string)
 	if !ok {
-		return nil, fmt.Errorf("invalid trace object")
+		return nil, errors.NewInvalidInputf(errors.CodeInvalidInput, "invalid trace object")
 	}
 	dec := json.NewDecoder(strings.NewReader(text))
 	dec.UseNumber()
@@ -40,7 +41,7 @@ func prepareTraceMediaRows(ctx context.Context, tx *sql.Tx, prefix string, rows 
 	for i, row := range rows {
 		result[i] = append([]any(nil), row...)
 		if len(row) != 31 {
-			return nil, fmt.Errorf("invalid trace row contract")
+			return nil, errors.NewInvalidInputf(errors.CodeInvalidInput, "invalid trace row contract")
 		}
 		attrs, err := decodeMediaObject(row[22])
 		if err != nil {
