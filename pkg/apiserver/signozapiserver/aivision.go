@@ -25,6 +25,9 @@ func (provider *provider) addAIVisionRoutes(router *mux.Router) error {
 		serve              http.HandlerFunc
 		resources          []coretypes.Resource
 	}{
+		{"media/limits", "GET", "MediaLimits", h.TraceMedia, traces},
+		{"media/{mediaID}/content", "GET", "MediaContent", h.TraceMedia, traces},
+		{"media/{mediaID}", "GET", "MediaMetadata", h.TraceMedia, traces},
 		{"traces", "GET", "Traces", h.Traces, traces},
 		{"traces/read-model/page", "GET", "ReadModelPage", h.ReadModel, traces},
 		{"traces/read-model/capabilities", "GET", "ReadModelCapabilities", h.ReadModel, traces},
@@ -83,6 +86,16 @@ func (provider *provider) addAIVisionRoutes(router *mux.Router) error {
 		}
 	}
 
+	// Upload/delete belong to the data-plane write role, never Viewer.
+	for _, route := range []struct{ path, method string }{{"media", "POST"}, {"media/{mediaID}", "DELETE"}} {
+		secured := provider.authzMiddleware.AdminAccess(provider.authzMiddleware.CheckResources(h.TraceMediaWrite, authtypes.SigNozAdminRoleName))
+		def := handler.OpenAPIDef{ID: "AIVisionMedia" + route.method, Tags: []string{"ai-vision"}, Summary: "Write trace media", Response: new(map[string]any), ResponseContentType: "application/json", SuccessStatusCode: http.StatusCreated, SecuritySchemes: newScopedSecuritySchemes([]string{coretypes.ResourceTelemetryResourceTraces.Scope(coretypes.VerbRead)})}
+		if err := router.Handle("/api/v1/ai-vision/"+route.path, handler.New(secured, def, handler.WithResourceDefs(handler.TelemetryResourceDef{Verb: coretypes.VerbRead, Category: coretypes.ActionCategoryDataAccess, Selector: querybuilder.TelemetrySelector, Resources: func(coretypes.ExtractorContext) ([]coretypes.ResourceWithID, error) {
+			return []coretypes.ResourceWithID{{Resource: coretypes.ResourceTelemetryResourceTraces, ID: "ai_vision/" + coretypes.WildCardSelectorString}}, nil
+		}}))).Methods(route.method).GetError(); err != nil {
+			return err
+		}
+	}
 	for _, action := range []string{"publish", "batch-publish", "backfill", "maintenance/resume"} {
 		secured := provider.authzMiddleware.AdminAccess(provider.authzMiddleware.CheckResources(h.ReadModel, authtypes.SigNozAdminRoleName))
 		def := handler.OpenAPIDef{ID: "AIVisionReadModel" + action, Tags: []string{"ai-vision"}, Summary: action, Request: new(map[string]any), RequestContentType: "application/json", Response: new(map[string]any), ResponseContentType: "application/json", SuccessStatusCode: http.StatusOK, SecuritySchemes: newScopedSecuritySchemes([]string{coretypes.ResourceTelemetryResourceTraces.Scope(coretypes.VerbRead)})}
