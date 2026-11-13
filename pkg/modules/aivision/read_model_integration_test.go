@@ -103,6 +103,38 @@ func TestOceanBaseTraceReadModel(t *testing.T) {
 	require.Len(t, rows, 3)
 	require.Equal(t, fmt.Sprintf("%032x", 3), rows[0]["trace_id"])
 	require.Equal(t, json.Number("9007199254740993"), rows[0]["total_tokens"])
+	t.Run("canonical_token_order_preserves_zero_and_null", func(t *testing.T) {
+		// These are verified, ready summary documents. A Session helper may
+		// represent the no-call trace as zero, but its Trace total is unknown.
+		for i, usage := range []struct {
+			billable int
+			total    string
+		}{{0, "null"}, {1, "0"}, {1, "9007199254740993"}} {
+			_, err := db.Exec("UPDATE "+store.readModelTable("trace_projections")+" SET row_json=JSON_SET(row_json,'$.coverage',JSON_OBJECT('billableCalls',?),'$.usage',JSON_EXTRACT(?, '$')) WHERE org_id=? AND space_id=? AND trace_id=?",
+				usage.billable, fmt.Sprintf(`{"total":%s}`, usage.total), org, "scope", fmt.Sprintf("%032x", i+1))
+			require.NoError(t, err)
+		}
+		for _, tc := range []struct {
+			order string
+			want  []int
+		}{{"total_tokens.asc", []int{2, 3, 1}}, {"attributes.gen_ai.usage.total_tokens.desc", []int{3, 2, 1}}} {
+			query := params
+			query.OrderBy = tc.order
+			query.TokenNullsLast = true
+			query.Limit = 1
+			for i, trace := range tc.want {
+				query.Page = i + 1
+				result, err := store.readModelPage(ctx, org, query)
+				require.NoError(t, err)
+				page := result.(map[string]any)
+				require.Equal(t, true, page["supported"], "%v", page)
+				meta := page["meta"].(map[string]any)
+				require.Equal(t, true, meta["tokenNullsLast"])
+				require.Equal(t, 3, meta["totalItems"])
+				require.Equal(t, fmt.Sprintf("%032x", trace), page["data"].([]map[string]any)[0]["trace_id"])
+			}
+		}
+	})
 	// A new optional metrics supplement must not invalidate ready list rows.
 	legacyDirty, err := store.dirtyTraceSources(ctx, org, "scope", contextHash, "", 10, "")
 	require.NoError(t, err)
