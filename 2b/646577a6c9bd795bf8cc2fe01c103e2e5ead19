@@ -1,0 +1,25 @@
+pkg/modules/aivision/native.go
+  s_2f5254e8b447ea::t_728086d1d173e3 42
+pkg/modules/aivision/read_model.go
+  s_2f5254e8b447ea::t_4132ef519d6b4f 382,402-408,1018,1020-1022,1042-1054,1056,1089,1111,1113-1121,1256-1258
+pkg/modules/aivision/read_model_integration_test.go
+  s_2f5254e8b447ea::t_e410017318508a 106-137
+pkg/modules/aivision/read_model_test.go
+  s_2f5254e8b447ea::t_b323f8e94aaedb 141,149-164
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "2b646577a6c9bd795bf8cc2fe01c103e2e5ead19",
+  "prompts": {},
+  "sessions": {
+    "s_2f5254e8b447ea": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1c861-1fe5-7443-9616-cecbccffd4e1",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Haili Zhang <haili.zhang@outlook.com>"
+    }
+  }
+}
