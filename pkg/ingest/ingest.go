@@ -48,14 +48,14 @@ type Config struct {
 	// exporter header. An empty key disables registration (fail closed): the
 	// public API port must never accept unauthenticated telemetry writes.
 	InternalKey string
-	// MaxBodyBytes caps a single OTLP request body. Defaults to 32 MiB.
+	// MaxBodyBytes caps a single OTLP request body. Defaults to 64 MiB.
 	MaxBodyBytes int64
 	// MaxOpenConns / MaxIdleConns of the dedicated write pool.
 	MaxOpenConns int
 	MaxIdleConns int
 }
 
-const defaultMaxBodyBytes = 32 << 20
+const defaultMaxBodyBytes = 64 << 20
 
 const defaultTablePrefix = "signoz"
 
@@ -137,6 +137,7 @@ func AddToRouter(router *mux.Router, cfg Config, logger *slog.Logger) error {
 		metricsTable: metricsTable(cfg.TablePrefix),
 		logger:       logger,
 	}
+	go ep.maintainTraceMedia()
 	router.HandleFunc("/v1/traces", ep.handleTraces).Methods(http.MethodPost)
 	router.HandleFunc("/v1/logs", ep.handleLogs).Methods(http.MethodPost)
 	router.HandleFunc("/v1/metrics", ep.handleMetrics).Methods(http.MethodPost)
@@ -336,6 +337,12 @@ func (ep *endpoint) insertRows(ctx context.Context, table, columns, upsert strin
 			if err := LockTraceSource(ctx, tx, ep.cfg.TablePrefix, key.OrgID, key.SpaceID, key.TraceID); err != nil {
 				return err
 			}
+		}
+	}
+	if table == ep.tracesTable && columns == spanInsertColumns {
+		rows, err = prepareTraceMediaRows(ctx, tx, ep.cfg.TablePrefix, rows)
+		if err != nil {
+			return fmt.Errorf("prepare trace media: %w", err)
 		}
 	}
 	stmt, err := tx.PrepareContext(ctx, "INSERT INTO "+table+columns+upsert)
