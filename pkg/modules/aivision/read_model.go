@@ -379,7 +379,7 @@ func (h *handler) ReadModel(w http.ResponseWriter, r *http.Request) {
 		}
 	case "page":
 		allowed := map[string]bool{}
-		for _, key := range []string{"from", "to", "space_id", "agent_uuid", "agent_product", "user", "page", "limit", "orderBy", "order_by", "filters", "keyword", "searchType", "search_type", "input_keyword", "tags", "env", "scene", "username", "trace_id", "projection_context", "metadata_only"} {
+		for _, key := range []string{"from", "to", "space_id", "agent_uuid", "agent_product", "user", "page", "limit", "orderBy", "order_by", "filters", "keyword", "searchType", "search_type", "input_keyword", "tags", "env", "scene", "username", "trace_id", "projection_context", "metadata_only", "token_nulls_last"} {
 			allowed[key] = true
 		}
 		for key := range r.URL.Query() {
@@ -398,6 +398,13 @@ func (h *handler) ReadModel(w http.ResponseWriter, r *http.Request) {
 				} else {
 					p.MetadataOnly = values[0] == "true"
 				}
+			}
+			if values, present := q["token_nulls_last"]; present {
+				if len(values) != 1 || values[0] != "true" {
+					writeJSON(w, 200, readModelUnsupported("invalid_token_nulls_last"))
+					return
+				}
+				p.TokenNullsLast = true
 			}
 			p.ProjectionContext = q.Get("projection_context")
 			p.AgentUUID = q.Get("agent_uuid")
@@ -1008,8 +1015,11 @@ func readModelWhere(org string, p nativeListParams) (string, []any, error) {
 	}
 	return strings.Join(where, " AND "), args, nil
 }
-func readModelOrder(order string) (string, error) {
+func readModelOrder(order string, tokenNullsLast bool) (string, error) {
 	if order == "" {
+		if tokenNullsLast {
+			return "", tracePageUnsupported{"unsupported_order"}
+		}
 		return "p.start_ns DESC,p.trace_id DESC", nil
 	}
 	direction := "ASC"
@@ -1029,8 +1039,21 @@ func readModelOrder(order string) (string, error) {
 		field = parts[0]
 		direction = strings.ToUpper(parts[1])
 	}
+	if direction != "ASC" && direction != "DESC" {
+		return "", tracePageUnsupported{"unsupported_order"}
+	}
+	tokenOrder := field == "total_tokens" || field == "attributes.gen_ai.usage.total_tokens"
+	if tokenOrder != tokenNullsLast {
+		return "", tracePageUnsupported{"unsupported_order"}
+	}
+	if tokenOrder {
+		// Session totals use zero when there are no billable calls. The trace
+		// contract reports unknown in that case and preserves a reported zero.
+		value := "CASE WHEN p." + sessionTokenGeneratedBillableColumn + "=1 THEN p." + sessionTokenGeneratedValueColumn + " ELSE NULL END"
+		return "(" + value + " IS NULL) ASC," + value + " " + direction + ",BINARY p.trace_id " + direction, nil
+	}
 	column := map[string]string{"start_time_unix_nano": "start_ns", "end_time_unix_nano": "end_ns", "period": "period", "duration": "duration", "duration_ms": "duration", "node_count": "node_count", "span_count": "node_count", "trace_id": "trace_id"}[field]
-	if column == "" || (direction != "ASC" && direction != "DESC") {
+	if column == "" {
 		return "", tracePageUnsupported{"unsupported_order"}
 	}
 	return "(p." + column + " IS NULL) " + direction + ",p." + column + " " + direction + ",p.trace_id " + direction, nil
@@ -1063,7 +1086,7 @@ func (s *oceanBaseStore) readModelPage(ctx context.Context, org string, p native
 	if err != nil {
 		return nil, err
 	}
-	order, err := readModelOrder(p.OrderBy)
+	order, err := readModelOrder(p.OrderBy, p.TokenNullsLast)
 	if e, ok := err.(tracePageUnsupported); ok {
 		return readModelUnsupported(e.reason), nil
 	}
@@ -1085,16 +1108,17 @@ func (s *oceanBaseStore) readModelPage(ctx context.Context, org string, p native
 	} else if !ready {
 		return readModelUnsupported("projection_summary_columns_unavailable"), nil
 	}
+	usesTokens := p.TokenNullsLast
 	for _, filter := range p.Filters {
-		if filter.Field == "total_tokens" || filter.Field == "attributes.gen_ai.usage.total_tokens" {
-			ready, reason, err := s.sessionTokenGeneratedCapability(ctx, tx)
-			if err != nil {
-				return nil, err
-			}
-			if !ready {
-				return readModelUnsupported(reason), nil
-			}
-			break
+		usesTokens = usesTokens || filter.Field == "total_tokens" || filter.Field == "attributes.gen_ai.usage.total_tokens"
+	}
+	if usesTokens {
+		ready, reason, err := s.sessionTokenGeneratedCapability(ctx, tx)
+		if err != nil {
+			return nil, err
+		}
+		if !ready {
+			return readModelUnsupported(reason), nil
 		}
 	}
 	var covered bool
@@ -1229,6 +1253,9 @@ func (s *oceanBaseStore) readModelPage(ctx context.Context, org string, p native
 	}
 	meta := map[string]any{"contract": traceReadModelContract, "queryMode": "read_model", "queryContract": traceReadModelContract, "environmentSemantics": "root-span-resource-v1", "userIdentitySemantics": "trace-sdk-user-id-v1", "complete": true, "projection_context": p.ProjectionContext, "from": p.From, "to": p.To, "space_id": p.SpaceID, "agent_product": p.AgentProduct, "user": p.User, "agent_uuid": p.AgentUUID, "page": p.Page, "limit": p.Limit, "totalItems": total, "windowTotalItems": windowTotal, "totalPages": (total + p.Limit - 1) / p.Limit}
 	meta["contentCoverageStrategy"] = contentStrategy
+	if p.TokenNullsLast {
+		meta["tokenNullsLast"] = true
+	}
 	result := map[string]any{"supported": true, "data": data, "facets": facets, "meta": meta}
 	encoded, err := json.Marshal(result)
 	if err != nil {
