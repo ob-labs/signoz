@@ -1,0 +1,27 @@
+pkg/ingest/trace_media.go
+  s_0ba4aa59e34a4f::t_a4c1b4d76df694 13-14,320-323
+pkg/ingest/trace_media_store_test.go
+  s_0ba4aa59e34a4f::t_a4c1b4d76df694 8-9,214-292
+pkg/ingest/TRACE_MEDIA.md
+  s_0ba4aa59e34a4f::t_a4c1b4d76df694 18-21,66-68
+pkg/ingest/trace_media_store.go
+  s_0ba4aa59e34a4f::t_a4c1b4d76df694 22-25,55
+pkg/ingest/trace_media_integration_test.go
+  s_0ba4aa59e34a4f::t_a4c1b4d76df694 6,9,16-17,132,163,178-264
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "ccf7532f8a8c7304f0c90a6d792f2d649837b945",
+  "prompts": {},
+  "sessions": {
+    "s_0ba4aa59e34a4f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e88a-287f-7a21-9da2-deabcaee1e73",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Haili Zhang <haili.zhang@outlook.com>"
+    }
+  }
+}
