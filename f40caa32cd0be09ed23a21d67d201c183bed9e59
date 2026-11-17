@@ -1,0 +1,42 @@
+pkg/ingest/trace_media.go
+  s_9c31db64bd80e3::t_677715c7cb8afa 26-217,224,227-229,232,235,242,245,249,253,258,265,267-268,270,277,279,286,288-290,292,296,299,340,348,355,358,365,370,372,378,383-384,387-388
+  s_9c31db64bd80e3::t_7108d0fb50244d 1-25,218-223,225-226,230-231,233-234,236-241,243-244,246-248,250-252,254-257,259-264,266,269,271-276,278,280-285,287,291,293-295,297-298,300-339,341-347,349-354,356-357,359-364,366-369,371,373-377,379-382,385-386,389-395
+pkg/ingest/trace_media_test.go
+  s_9c31db64bd80e3::t_b5f41ea02ea8f4 26,30,33-34,37-38,45,49,53-54,62,65,69-70,73,76,80-81,84,88-90,97-98,107,120,125-127,151-159,161-165
+  s_9c31db64bd80e3::t_677715c7cb8afa 57,101,119,130-136,138-150
+  s_8335a78463939f::t_7f4a2ce1033335 1-25,27-29,31-32,35-36,39-44,46-48,50-52,55-56,58-61,63-64,66-68,71-72,74-75,77-79,82-83,85-87,91-96,99-100,102-106,108-118,121-124,128-129,137,160
+pkg/ingest/TRACE_MEDIA.md
+  s_8335a78463939f::t_d7a3c0fa5b324a 1-61
+pkg/ingest/trace_media_integration_test.go
+  s_8335a78463939f::t_72db4191748dca 1-143
+pkg/ingest/trace_media_store.go
+  s_8335a78463939f::t_6375d0461182d1 1-128
+pkg/modules/aivision/trace_media.go
+  s_8335a78463939f::t_6ea3c468fda20f 1-337
+pkg/modules/aivision/trace_media_write.go
+  s_8335a78463939f::t_d9c55b2119d44f 1-77
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "f40caa32cd0be09ed23a21d67d201c183bed9e59",
+  "prompts": {},
+  "sessions": {
+    "s_8335a78463939f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1d419-43c7-7291-b0e8-1d1cc008245f",
+        "model": "gpt-6.1-terra"
+      },
+      "human_author": "laochou.sc <laochou.sc@digital-engine.com>"
+    },
+    "s_9c31db64bd80e3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1ca05-4a17-7683-b8a3-38aebb8aefe9",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "laochou.sc <laochou.sc@digital-engine.com>"
+    }
+  }
+}

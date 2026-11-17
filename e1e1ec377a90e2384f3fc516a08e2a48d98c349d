@@ -1,0 +1,20 @@
+pkg/ingest/TRACE_MEDIA.md
+  h_300a4f369432d5 20-21,43-46,62-69
+pkg/ingest/trace_media.go
+  h_300a4f369432d5 34-78,108-110,162-164,228-229,233-240,248,251,259-262,265,273,304-307,374,376
+pkg/ingest/trace_media_integration_test.go
+  h_300a4f369432d5 28,48,72,106,124-133,136-137,139-147,150-173
+pkg/ingest/trace_media_test.go
+  h_300a4f369432d5 22-23,72-93
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "e1e1ec377a90e2384f3fc516a08e2a48d98c349d",
+  "prompts": {},
+  "humans": {
+    "h_300a4f369432d5": {
+      "author": "laochou.sc <laochou.sc@digital-engine.com>"
+    }
+  }
+}

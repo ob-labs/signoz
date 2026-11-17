@@ -1,0 +1,20 @@
+pkg/modules/aivision/native.go
+  h_300a4f369432d5 42
+pkg/modules/aivision/read_model.go
+  h_300a4f369432d5 382,402-408,1018,1020-1022,1042-1054,1056,1089,1111,1113-1121,1256-1258
+pkg/modules/aivision/read_model_integration_test.go
+  h_300a4f369432d5 106-137
+pkg/modules/aivision/read_model_test.go
+  h_300a4f369432d5 141,149-164
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "1ba71c9485684901884b282ab0018c5b2570513d",
+  "prompts": {},
+  "humans": {
+    "h_300a4f369432d5": {
+      "author": "laochou.sc <laochou.sc@digital-engine.com>"
+    }
+  }
+}
