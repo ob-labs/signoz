@@ -10,6 +10,8 @@ import (
 	"io"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/SigNoz/signoz/pkg/errors"
 )
 
 // traceMedia describes validated bytes discovered in a typed message block.
@@ -315,6 +317,10 @@ func projectTraceMedia(raw string, maxBytes int, resolve func(traceMedia) (strin
 			}
 			if len(items) == 1 {
 				id, err := resolve(items[0])
+				if errors.Is(err, errTraceMediaSpaceQuota) {
+					changed = true
+					return map[string]any{"type": "aivision_media_error", "reason": "budget"}, nil
+				}
 				if err != nil {
 					return nil, err
 				}

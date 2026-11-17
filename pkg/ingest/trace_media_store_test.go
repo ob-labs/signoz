@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"github.com/SigNoz/signoz/pkg/errors"
 	"regexp"
 	"strings"
@@ -208,4 +210,83 @@ func expectMediaQuota(mock sqlmock.Sqlmock) {
 	mock.ExpectQuery("SELECT space_id FROM `test_trace_media_quota`").WillReturnRows(sqlmock.NewRows([]string{"space_id"}).AddRow("space"))
 	mock.ExpectQuery("SELECT COUNT.*FROM `test_trace_media`").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery("SELECT COALESCE.*FROM `test_trace_media`").WillReturnRows(sqlmock.NewRows([]string{"used"}).AddRow(0))
+}
+
+// Obtain the actual admission error so the projection regression exercises the
+// same condition as the store instead of relying on an error message match.
+func traceMediaQuotaForTest(t *testing.T) error {
+	t.Helper()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	mock.ExpectBegin()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("%PDF-example")
+	hash := sha256.Sum256(data)
+	mock.ExpectExec("INSERT INTO `test_trace_media_quota`").WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery("SELECT space_id FROM `test_trace_media_quota`").WillReturnRows(sqlmock.NewRows([]string{"space_id"}).AddRow("space"))
+	mock.ExpectQuery("SELECT COUNT.*FROM `test_trace_media`").WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("SELECT COALESCE.*FROM `test_trace_media`").WillReturnRows(sqlmock.NewRows([]string{"used"}).AddRow(100 << 20))
+	mock.ExpectRollback()
+	_, quotaErr := persistTraceMedia(context.Background(), tx, "test", mediaScope{"org", "space", "agent", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", "output"}, traceMedia{"application/pdf", hex.EncodeToString(hash[:]), data})
+	if quotaErr == nil {
+		t.Fatal("full space accepted new media")
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatal(err)
+	}
+	return quotaErr
+}
+
+func TestProjectTraceMediaQuotaKeepsOtherMediaAndText(t *testing.T) {
+	quotaErr := traceMediaQuotaForTest(t)
+	media := `{"type":"file","mime_type":"application/pdf","data":"JVBERi1leGFtcGxl"}`
+	raw := `[{"role":"assistant","content":[{"type":"text","text":"caption before"},` + media + `,` + media + `,{"type":"text","text":"caption after"}]}]`
+	calls := 0
+	projected, err := projectTraceMedia(raw, 16<<20, func(traceMedia) (string, error) {
+		calls++
+		if calls == 1 {
+			return "accepted", nil
+		}
+		return "", fmt.Errorf("admission: %w", quotaErr)
+	})
+	if err != nil {
+		t.Fatalf("quota rejected the entire attribute: %v", err)
+	}
+	var messages []struct {
+		Role    string           `json:"role"`
+		Content []map[string]any `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(projected), &messages); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || len(messages) != 1 || messages[0].Role != "assistant" || len(messages[0].Content) != 4 {
+		t.Fatalf("message structure changed: %s", projected)
+	}
+	parts := messages[0].Content
+	if parts[0]["text"] != "caption before" || parts[3]["text"] != "caption after" || parts[1]["type"] != "aivision_attachment" || parts[1]["id"] != "accepted" || parts[2]["type"] != "aivision_media_error" || parts[2]["reason"] != "budget" || strings.Contains(projected, "JVBERi") {
+		t.Fatalf("mixed quota projection: %s", projected)
+	}
+
+	// A storage failure after a quota descriptor still aborts the transaction.
+	storageErr := errors.NewInternalf(errors.CodeInternal, "quota table query failed")
+	calls = 0
+	projected, err = projectTraceMedia(raw, 16<<20, func(traceMedia) (string, error) {
+		calls++
+		if calls == 1 {
+			return "", quotaErr
+		}
+		return "", storageErr
+	})
+	if !errors.Is(err, storageErr) || projected != "" || calls != 2 {
+		t.Fatalf("storage failure was swallowed after quota: value=%q calls=%d error=%v", projected, calls, err)
+	}
 }

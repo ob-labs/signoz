@@ -3,14 +3,18 @@ package ingest
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/SigNoz/signoz/pkg/errors"
 )
 
 // Uses isolated tables and the actual configured engine. Does not modify
@@ -125,7 +129,7 @@ func TestOceanBaseTraceMediaTransactionAndBoundary(t *testing.T) {
 		return StoreTraceMedia(ctx, db, prefix, scope.org, scope.space, scope.agent, scope.trace, span, scope.direction, "application/pdf", data)
 	}
 	isQuota := func(err error) bool {
-		return err != nil && strings.Contains(err.Error(), "quota")
+		return errors.Is(err, errTraceMediaSpaceQuota)
 	}
 	// The original 16 MiB plus five distinct spans is 96 MiB, not 112 MiB.
 	for i := 0; i < 5; i++ {
@@ -156,7 +160,7 @@ func TestOceanBaseTraceMediaTransactionAndBoundary(t *testing.T) {
 		}()
 	}
 	first, second := <-results, <-results
-	if !(first == nil && isQuota(second) || second == nil && isQuota(first)) {
+	if (first != nil || !isQuota(second)) && (second != nil || !isQuota(first)) {
 		t.Fatalf("exactly one writer must reach 100 MiB: %v, %v", first, second)
 	}
 	var used int64
@@ -171,4 +175,91 @@ func TestOceanBaseTraceMediaTransactionAndBoundary(t *testing.T) {
 			t.Fatalf("new or expired attachment %s at full quota: %v", span, err)
 		}
 	}
+
+	// Inline OTLP at full quota still commits its span and captions. Both
+	// directions receive budget descriptors while exact sources remain scoped
+	// to the trusted restoration pointers, outside both display copies.
+	quotaTraces := newTestTraces()
+	quotaRS := quotaTraces.ResourceSpans().At(0)
+	quotaRS.Resource().Attributes().PutStr("aivision.agent.id", scope.agent)
+	quotaSpan := quotaRS.ScopeSpans().At(0).Spans().At(0)
+	quotaSpan.SetName("quota-preserves-span")
+	originals := map[string]string{}
+	for _, tc := range []struct{ key, role, caption string }{
+		{"input.value", "user", "input caption survives quota"},
+		{"output.value", "assistant", "output caption survives quota"},
+	} {
+		raw := `[{"role":"` + tc.role + `","content":[{"type":"text","text":"` + tc.caption + `"},{"type":"file","mime_type":"application/pdf","data":"JVBERi1leGFtcGxl"}]}]`
+		originals[tc.key] = raw
+		quotaSpan.Attributes().PutStr(tc.key, raw)
+	}
+	quotaRows, err := buildSpanRows(quotaTraces, scope.org)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err = db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func(tx *sql.Tx) { _ = tx.Rollback() }(tx)
+	prepared, err = prepareTraceMediaRows(ctx, tx, prefix, quotaRows)
+	if err != nil {
+		t.Fatalf("quota must not reject the OTLP span: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO "+spansTable(prefix)+spanInsertColumns+spanUpsert, prepared[0]...); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	var name, attrsJSON, payloadJSON string
+	if err := db.QueryRowContext(ctx, "SELECT span_name,attributes,payload FROM "+spansTable(prefix)+" WHERE org_id=? AND space_id=? AND trace_id=? AND span_id=?", quotaRows[0][0], quotaRows[0][1], quotaRows[0][3], quotaRows[0][4]).Scan(&name, &attrsJSON, &payloadJSON); err != nil {
+		t.Fatal(err)
+	}
+	if name != "quota-preserves-span" || strings.Contains(attrsJSON, "JVBERi") || strings.Contains(payloadJSON, "JVBERi") {
+		t.Fatal("span or compact display copies changed")
+	}
+	var quotaAttrs map[string]any
+	if err := json.Unmarshal([]byte(attrsJSON), &quotaAttrs); err != nil {
+		t.Fatal(err)
+	}
+	var quotaPayload struct {
+		Attributes map[string]any `json:"attributes"`
+	}
+	if err := json.Unmarshal([]byte(payloadJSON), &quotaPayload); err != nil {
+		t.Fatal(err)
+	}
+	pointers, ok := quotaAttrs[MediaOriginalsAttribute].(map[string]any)
+	if !ok || len(pointers) != 2 {
+		t.Fatal("missing exact-source restoration pointers")
+	}
+	for key, original := range originals {
+		projected, ok := quotaAttrs[key].(string)
+		if !ok || quotaPayload.Attributes[key] != projected {
+			t.Fatalf("display copies disagree for %s", key)
+		}
+		var messages []struct {
+			Role    string           `json:"role"`
+			Content []map[string]any `json:"content"`
+		}
+		if err := json.Unmarshal([]byte(projected), &messages); err != nil {
+			t.Fatal(err)
+		}
+		role, caption := "user", "input caption survives quota"
+		if key == "output.value" {
+			role, caption = "assistant", "output caption survives quota"
+		}
+		if len(messages) != 1 || messages[0].Role != role || len(messages[0].Content) != 2 || messages[0].Content[0]["text"] != caption || messages[0].Content[1]["type"] != "aivision_media_error" || messages[0].Content[1]["reason"] != "budget" {
+			t.Fatalf("quota lost role/caption/order for %s: %s", key, projected)
+		}
+		projectionHash := sha256.Sum256([]byte(projected))
+		if err := db.QueryRowContext(ctx, "SELECT original FROM "+tableName(prefix, "trace_media_original")+" WHERE id=? AND org_id=? AND space_id=? AND agent_id=? AND trace_id=? AND span_id=? AND attribute_key=? AND projected_sha256=?", pointers[key], quotaRows[0][0], quotaRows[0][1], scope.agent, quotaRows[0][3], quotaRows[0][4], key, hex.EncodeToString(projectionHash[:])).Scan(&stored); err != nil || string(stored) != original {
+			t.Fatalf("quota source reconstruction for %s: %v", key, err)
+		}
+	}
+	if err := db.QueryRowContext(ctx, "SELECT COALESCE(SUM(OCTET_LENGTH(content)),0) FROM "+tableName(prefix, "trace_media")+" WHERE created_at>=?", time.Now().Add(-30*24*time.Hour)).Scan(&used); err != nil || used != 100<<20 {
+		t.Fatalf("inline quota relaxed admission: active bytes=%d error=%v", used, err)
+	}
+
 }

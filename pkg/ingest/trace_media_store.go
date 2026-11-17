@@ -19,6 +19,10 @@ type mediaScope struct {
 var mediaTraceID = regexp.MustCompile(`^[0-9a-f]{32}$`)
 var mediaSpanID = regexp.MustCompile(`^[0-9a-f]{16}$`)
 
+// Only admission overflow may degrade inline media to a budget descriptor.
+// Keep the invalid-input type for explicit upload callers.
+var errTraceMediaSpaceQuota = errors.NewInvalidInputf(errors.CodeInvalidInput, "trace media space quota exceeded")
+
 // persistTraceMedia writes a content-addressed attachment in the caller's
 // transaction. A reference is returned only after the database accepts it.
 func persistTraceMedia(ctx context.Context, tx *sql.Tx, prefix string, scope mediaScope, media traceMedia) (string, error) {
@@ -48,7 +52,7 @@ func persistTraceMedia(ctx context.Context, tx *sql.Tx, prefix string, scope med
 			return "", err
 		}
 		if used+int64(len(media.Data)) > 100<<20 {
-			return "", errors.NewInvalidInputf(errors.CodeInvalidInput, "trace media space quota exceeded")
+			return "", errTraceMediaSpaceQuota
 		}
 	}
 	query := "INSERT INTO " + tableName(prefix, "trace_media") + " (id,org_id,space_id,agent_id,trace_id,span_id,direction,mime_type,sha256,content) VALUES (?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE created_at=CURRENT_TIMESTAMP(6)"

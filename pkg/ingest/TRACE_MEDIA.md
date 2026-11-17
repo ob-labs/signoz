@@ -15,7 +15,10 @@ Retries deduplicate within that scope. Large integers are parsed with UseNumber.
 Only explicit content/message containers are traversed. Native OpenAI
 `input_file` / `file.file_data`, Anthropic source blocks and MCP `resource.blob`
 use the same projection; file names and resource URIs never trigger reads. URLs are never fetched.
-Invalid or oversized explicit Base64 is projected to a small error descriptor;
+Inline media exceeding the active space quota is projected to the same budget
+error descriptor as oversized media, preserving the span and sibling text.
+Explicit multipart uploads still reject quota overflow. Storage failures still
+roll back the transaction. Invalid or oversized explicit Base64 is projected to a small error descriptor;
 its exact original field remains available in raw reads.
 Redaction markers in ordinary text do not change its display. Only markers in
 recognized media source fields produce a filtered-media descriptor.
@@ -60,7 +63,9 @@ provided.
 `trace_media_integration_test.go` uses `SIGNOZ_TEST_OCEANBASE_DSN` and unique
 temporary tables. It verifies a real 16 MiB write/read, exact originals,
 rollback, deduplication, removal of Base64 from both display copies, and quota
-admission at 96 MiB, exactly 100 MiB, and over the limit. Run against an isolated
+admission at 96 MiB, exactly 100 MiB, and over the limit. At full quota it also
+commits an inline-media span with input/output captions, budget descriptors and
+exact source restoration pointers without increasing active binary storage. Run against an isolated
 database whose `max_allowed_packet` is at least 64 MiB:
 
 ```sh
