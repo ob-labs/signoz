@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"github.com/SigNoz/signoz/pkg/errors"
 	"regexp"
 	"strings"
@@ -256,7 +255,7 @@ func TestProjectTraceMediaQuotaKeepsOtherMediaAndText(t *testing.T) {
 		if calls == 1 {
 			return "accepted", nil
 		}
-		return "", fmt.Errorf("admission: %w", quotaErr)
+		return "", errors.WrapInvalidInputf(quotaErr, errors.CodeInvalidInput, "admission")
 	})
 	if err != nil {
 		t.Fatalf("quota rejected the entire attribute: %v", err)
