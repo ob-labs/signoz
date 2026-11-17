@@ -17,6 +17,8 @@ Only explicit content/message containers are traversed. Native OpenAI
 use the same projection; file names and resource URIs never trigger reads. URLs are never fetched.
 Invalid or oversized explicit Base64 is projected to a small error descriptor;
 its exact original field remains available in raw reads.
+Redaction markers in ordinary text do not change its display. Only markers in
+recognized media source fields produce a filtered-media descriptor.
 
 Supported validated signatures include PNG, JPEG, GIF, WebP, AVIF, BMP, inert
 SVG, MP3, WAV, Ogg, FLAC, MP4/M4A, WebM, QuickTime, PDF and UTF-8 plain text,
@@ -38,8 +40,10 @@ HTML documents, untyped Base64 and private third-party file IDs are not loaded.
   removed during source restoration; exact attribute string values are retained.
 
 Limits: 16 MiB decoded bytes per file, 100 MiB active binary bytes per
-organization/space, 30 days binary retention, 64 MiB OTLP request body. A space
-quota lock serializes concurrent admission. Retries and expired-record
+organization/space, 30 days binary retention, and a default 64 MiB OTLP request
+body. AI Vision's Nginx frontend matches that request allowance only on
+`/api/public/otel/v1/traces`; its ordinary API routes retain a 32 MiB cap.
+A space quota lock serializes concurrent admission. Retries and expired-record
 reactivation obey quota. Hourly cleanup removes bounded batches of expired
 binary rows. Exact originals survive while their owning Trace exists; orphaned
 original rows are removed after 30 days.
@@ -55,7 +59,14 @@ provided.
 
 `trace_media_integration_test.go` uses `SIGNOZ_TEST_OCEANBASE_DSN` and unique
 temporary tables. It verifies a real 16 MiB write/read, exact originals,
-rollback, deduplication and removal of Base64 from both display copies.
+rollback, deduplication, removal of Base64 from both display copies, and quota
+admission at 96 MiB, exactly 100 MiB, and over the limit. Run against an isolated
+database whose `max_allowed_packet` is at least 64 MiB:
+
+```sh
+go test ./pkg/ingest -run '^TestOceanBaseTraceMediaTransactionAndBoundary$' -count=1 -v
+```
+
 `trace_media_test.go` and `trace_media_store_test.go` cover typed parsing,
 limits, SVG safety, order/numbers, storage failures and scope validation.
 The module tests verify source restoration scope and stale-reference denial.

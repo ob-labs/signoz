@@ -31,14 +31,55 @@ func traceMediaSource(block map[string]any) map[string]any {
 	return block
 }
 
+var traceMediaDataFields = []string{"data", "blob", "file_data"}
+var traceMediaURLFields = []string{"image_url", "audio_url", "video_url", "url", "file_url", "imageUrl", "audioUrl", "videoUrl", "fileUrl"}
+
+func traceMediaHasFilterMarker(value string) bool {
+	for {
+		index := strings.IndexByte(value, '[')
+		if index < 0 {
+			return false
+		}
+		value = value[index+1:]
+		for _, marker := range []string{"REDACTED", "FILTERED_"} {
+			if len(value) >= len(marker) && strings.EqualFold(value[:len(marker)], marker) {
+				return true
+			}
+		}
+	}
+}
+
+func traceMediaFilteredSource(source map[string]any) bool {
+	for _, key := range traceMediaDataFields {
+		if data, ok := source[key].(string); ok && traceMediaHasFilterMarker(data) {
+			return true
+		}
+	}
+	for _, key := range traceMediaURLFields {
+		candidate := source[key]
+		if nested, ok := candidate.(map[string]any); ok {
+			candidate = nested["url"]
+		}
+		if url, ok := candidate.(string); ok && traceMediaHasFilterMarker(url) {
+			return true
+		}
+	}
+	return false
+}
+
+func traceMediaHasMIME(source map[string]any) bool {
+	for _, key := range []string{"media_type", "mime_type", "mimeType"} {
+		if mime, ok := source[key].(string); ok && mime != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // extractTraceMedia recognizes only explicit model media blocks. It does not
 // fetch URLs, guess untyped base64 or interpret redaction placeholders.
 func extractTraceMedia(raw string, maxBytes int) []traceMedia {
 	if maxBytes <= 0 {
-		return nil
-	}
-	upper := strings.ToUpper(raw)
-	if strings.Contains(upper, "[REDACTED") || strings.Contains(upper, "[FILTERED_") {
 		return nil
 	}
 	dec := json.NewDecoder(strings.NewReader(raw))
@@ -64,6 +105,9 @@ func extractTraceMedia(raw string, maxBytes int) []traceMedia {
 			}
 		case map[string]any:
 			kind, _ := v["type"].(string)
+			if kind == "text" && !traceMediaHasMIME(traceMediaSource(v)) {
+				return
+			}
 			mime, encoded := "", ""
 			if kind == "image_url" || kind == "input_image" || kind == "audio_url" || kind == "video_url" {
 				source := v["image_url"]
@@ -115,6 +159,9 @@ func extractTraceMedia(raw string, maxBytes int) []traceMedia {
 				}
 			}
 			if mime != "" && encoded != "" {
+				if traceMediaFilteredSource(traceMediaSource(v)) {
+					return
+				}
 				mime = strings.ToLower(mime)
 				if len(encoded) > base64.StdEncoding.EncodedLen(maxBytes) {
 					return
@@ -178,29 +225,30 @@ func projectTraceMedia(raw string, maxBytes int, resolve func(traceMedia) (strin
 			leaf = strings.HasPrefix(v, "data:")
 		case map[string]any:
 			kind, _ := v["type"].(string)
-			if kind == "" && (v["data"] != nil || v["url"] != nil || v["imageUrl"] != nil || v["audioUrl"] != nil || v["videoUrl"] != nil || v["fileUrl"] != nil) && (v["mime_type"] != nil || v["mimeType"] != nil || v["media_type"] != nil) {
+			source := traceMediaSource(v)
+			if kind == "" && (v["data"] != nil || v["url"] != nil || v["imageUrl"] != nil || v["audioUrl"] != nil || v["videoUrl"] != nil || v["fileUrl"] != nil) && traceMediaHasMIME(source) {
 				leaf = true
 			}
 			switch kind {
-			case "image_url", "input_image", "audio_url", "video_url", "input_audio", "base64", "image", "audio", "video", "document", "file", "input_file", "resource", "media", "text":
+			case "image_url", "input_image", "audio_url", "video_url", "input_audio", "base64", "image", "audio", "video", "document", "file", "input_file", "resource", "media":
+				leaf = true
+			case "text":
+				// Some SDKs use typed text for documents with an explicit MIME.
+				// Ordinary text, including redaction placeholders, is not media.
+				if !traceMediaHasMIME(source) {
+					return value, nil
+				}
 				leaf = true
 			}
 		}
 		if leaf {
-			encoded, err := json.Marshal(value)
-			upper := strings.ToUpper(string(encoded))
-			if strings.Contains(upper, "[REDACTED") || strings.Contains(upper, "[FILTERED_") {
-				changed = true
-				return map[string]any{"type": "aivision_media_error", "reason": "filtered"}, nil
-			}
-			if err != nil {
-				return nil, err
-			}
 			// Persist exact originals even when a typed media value cannot be
 			// previewed. Large or malformed Base64 must not reach display reads.
 			var typed map[string]any
+			filtered := false
 			switch v := value.(type) {
 			case string:
+				filtered = traceMediaHasFilterMarker(v)
 				if header, body, ok := strings.Cut(strings.TrimPrefix(v, "data:"), ";base64,"); ok {
 					typed = map[string]any{"mime_type": header, "data": body}
 				}
@@ -208,9 +256,13 @@ func projectTraceMedia(raw string, maxBytes int, resolve func(traceMedia) (strin
 				typed = v
 			}
 			source := traceMediaSource(typed)
+			if filtered || traceMediaFilteredSource(source) {
+				changed = true
+				return map[string]any{"type": "aivision_media_error", "reason": "filtered"}, nil
+			}
 			body := ""
 			dataURL := false
-			for _, key := range []string{"data", "blob", "file_data"} {
+			for _, key := range traceMediaDataFields {
 				if candidate, ok := source[key].(string); ok && candidate != "" {
 					body = candidate
 					break
@@ -218,7 +270,7 @@ func projectTraceMedia(raw string, maxBytes int, resolve func(traceMedia) (strin
 			}
 			// Classify failures for every supported URL envelope, not only
 			// image_url. Otherwise invalid/oversized data URLs remain inline.
-			for _, key := range []string{"image_url", "audio_url", "video_url", "url", "file_url", "imageUrl", "audioUrl", "videoUrl", "fileUrl"} {
+			for _, key := range traceMediaURLFields {
 				candidate := source[key]
 				if nested, ok := candidate.(map[string]any); ok {
 					candidate = nested["url"]
@@ -248,6 +300,10 @@ func projectTraceMedia(raw string, maxBytes int, resolve func(traceMedia) (strin
 			}
 			if len(body) > base64.StdEncoding.EncodedLen(maxBytes) || decodedSize > maxBytes {
 				reason = "budget"
+			}
+			encoded, err := json.Marshal(value)
+			if err != nil {
+				return nil, err
 			}
 			items := extractTraceMedia(string(encoded), maxBytes)
 			if (body != "" || dataURL) && len(items) == 0 && reason == "" {
@@ -315,9 +371,9 @@ func validTraceMedia(mime string, data []byte) bool {
 		return bytes.HasPrefix(data, []byte("BM"))
 	case "audio/flac", "audio/x-flac":
 		return bytes.HasPrefix(data, []byte("fLaC"))
-	case "audio/mp4", "audio/x-m4a", "video/quicktime":
+	case "audio/mp4", "audio/x-m4a", "video/quicktime", "video/mp4":
 		return len(data) >= 12 && string(data[4:8]) == "ftyp"
-	case "audio/webm":
+	case "audio/webm", "video/webm":
 		return bytes.HasPrefix(data, []byte("\x1a\x45\xdf\xa3")) && bytes.Contains(data[:min(len(data), 64)], []byte("webm"))
 	case "image/png":
 		return bytes.HasPrefix(data, []byte("\x89PNG\r\n\x1a\n"))
@@ -337,10 +393,6 @@ func validTraceMedia(mime string, data []byte) bool {
 		return bytes.HasPrefix(data, []byte("ID3")) || len(data) > 1 && data[0] == 255 && data[1]&224 == 224
 	case "application/pdf":
 		return bytes.HasPrefix(data, []byte("%PDF-"))
-	case "video/mp4":
-		return len(data) >= 12 && string(data[4:8]) == "ftyp"
-	case "video/webm":
-		return bytes.HasPrefix(data, []byte("\x1a\x45\xdf\xa3")) && bytes.Contains(data[:min(len(data), 64)], []byte("webm"))
 	case "text/plain", "text/markdown", "application/json":
 		return utf8.Valid(data)
 	}

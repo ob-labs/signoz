@@ -25,7 +25,7 @@ func TestOceanBaseTraceMediaTransactionAndBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	prefix := fmt.Sprintf("media_%x", time.Now().UnixNano())
 	defer func() {
@@ -45,6 +45,7 @@ func TestOceanBaseTraceMediaTransactionAndBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func(tx *sql.Tx) { _ = tx.Rollback() }(tx)
 	projected, err := persistProjectedTraceAttribute(ctx, tx, prefix, scope, "output.value", raw)
 	if err != nil {
 		t.Fatal(err)
@@ -68,10 +69,8 @@ func TestOceanBaseTraceMediaTransactionAndBoundary(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		defer func() { _ = tx.Rollback() }()
 		if _, err := persistProjectedTraceAttribute(ctx, tx, prefix, scope, "output.value", raw); err != nil {
-			if rollbackErr := tx.Rollback(); rollbackErr != nil {
-				t.Errorf("rollback: %v", rollbackErr)
-			}
 			t.Fatal(err)
 		}
 		if err := tx.Commit(); err != nil {
@@ -104,11 +103,9 @@ func TestOceanBaseTraceMediaTransactionAndBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func(tx *sql.Tx) { _ = tx.Rollback() }(tx)
 	prepared, err := prepareTraceMediaRows(ctx, tx, prefix, rows)
 	if err != nil {
-		if rollbackErr := tx.Rollback(); rollbackErr != nil {
-			t.Errorf("rollback: %v", rollbackErr)
-		}
 		t.Fatal(err)
 	}
 	if strings.Contains(fmt.Sprint(prepared[0][22]), "JVBERi") || strings.Contains(fmt.Sprint(prepared[0][25]), "JVBERi") || strings.Contains(fmt.Sprint(prepared[0][22]), "forged") {
@@ -124,30 +121,54 @@ func TestOceanBaseTraceMediaTransactionAndBoundary(t *testing.T) {
 	if rollbackErr := tx.Rollback(); rollbackErr != nil {
 		t.Errorf("rollback: %v", rollbackErr)
 	}
-	// Fill only this isolated space, then verify admission rejects both a
-	// new file and reactivation of an expired record at full active quota.
-	for i := 0; i < 4; i++ {
-		other := scope
-		other.span = fmt.Sprintf("%016x", i+10)
-		tx, _ := db.BeginTx(ctx, nil)
-		if _, err := persistProjectedTraceAttribute(ctx, tx, prefix, other, "output.value", raw); err != nil {
-			if rollbackErr := tx.Rollback(); rollbackErr != nil {
-				t.Errorf("rollback: %v", rollbackErr)
-			}
-			t.Fatal(err)
-		}
-		if err := tx.Commit(); err != nil {
-			t.Fatal(err)
+	store := func(span string, data []byte) (map[string]any, error) {
+		return StoreTraceMedia(ctx, db, prefix, scope.org, scope.space, scope.agent, scope.trace, span, scope.direction, "application/pdf", data)
+	}
+	isQuota := func(err error) bool {
+		return err != nil && strings.Contains(err.Error(), "quota")
+	}
+	// The original 16 MiB plus five distinct spans is 96 MiB, not 112 MiB.
+	for i := 0; i < 5; i++ {
+		if _, err := store(fmt.Sprintf("%016x", i+10), content); err != nil {
+			t.Fatalf("admission through 96 MiB: %v", err)
 		}
 	}
-	other := scope
-	other.span = "cccccccccccccccc"
-	tx, _ = db.BeginTx(ctx, nil)
-	if _, err := persistProjectedTraceAttribute(ctx, tx, prefix, other, "output.value", raw); err == nil || !strings.Contains(err.Error(), "quota") {
-		t.Fatalf("quota not enforced: %v", err)
-	}
-	if rollbackErr := tx.Rollback(); rollbackErr != nil {
-		t.Errorf("rollback: %v", rollbackErr)
+	if _, err := store("cccccccccccccccc", content); !isQuota(err) {
+		t.Fatalf("112 MiB must be rejected: %v", err)
 	}
 
+	tinyPDF := []byte("%PDF-x")
+	expiredSpan := "dddddddddddddddd"
+	expired, err := store(expiredSpan, tinyPDF)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, "UPDATE "+tableName(prefix, "trace_media")+" SET created_at=? WHERE id=?", time.Now().Add(-31*24*time.Hour), expired["id"]); err != nil {
+		t.Fatal(err)
+	}
+
+	// Two writers contend for the remaining 4 MiB. Exactly one may fill it.
+	results := make(chan error, 2)
+	for _, span := range []string{"eeeeeeeeeeeeeeee", "ffffffffffffffff"} {
+		go func() {
+			_, err := store(span, content[:4<<20])
+			results <- err
+		}()
+	}
+	first, second := <-results, <-results
+	if !(first == nil && isQuota(second) || second == nil && isQuota(first)) {
+		t.Fatalf("exactly one writer must reach 100 MiB: %v, %v", first, second)
+	}
+	var used int64
+	if err := db.QueryRowContext(ctx, "SELECT COALESCE(SUM(OCTET_LENGTH(content)),0) FROM "+tableName(prefix, "trace_media")+" WHERE created_at>=?", time.Now().Add(-30*24*time.Hour)).Scan(&used); err != nil || used != 100<<20 {
+		t.Fatalf("active bytes: %d, error: %v", used, err)
+	}
+	if _, err := store(scope.span, content); err != nil {
+		t.Fatalf("retry of active attachment at full quota: %v", err)
+	}
+	for _, span := range []string{"1111111111111111", expiredSpan} {
+		if _, err := store(span, tinyPDF); !isQuota(err) {
+			t.Fatalf("new or expired attachment %s at full quota: %v", span, err)
+		}
+	}
 }

@@ -19,8 +19,8 @@ func TestExtractTraceMediaTypedAndBounded(t *testing.T) {
 		{fmt.Sprintf(`[{"type":"image_url","image_url":{"url":"data:image/png;base64,%s"}}]`, b64), 1},
 		{fmt.Sprintf(`{"type":"image","source":{"type":"base64","media_type":"image/png","data":"%s"}}`, b64), 1},
 		{fmt.Sprintf(`{"arbitrary":"%s"}`, b64), 0},
-		{fmt.Sprintf(`{"type":"image","mime_type":"image/png","data":"%s","text":"[REDACTED]"}`, b64), 0},
-		{fmt.Sprintf(`{"type":"image","mime_type":"image/png","data":"%s","text":"[redacted]"}`, b64), 0},
+		{fmt.Sprintf(`{"type":"image","mime_type":"image/png","data":"%s","text":"[REDACTED]"}`, b64), 1},
+		{`{"type":"image","mime_type":"image/png","data":"[redacted]"}`, 0},
 		{`{"type":"image_url","image_url":{"url":"https://example.invalid/image.png"}}`, 0},
 		{`{"type":"file","mime_type":"application/pdf","data":"YmFk"}`, 0},
 	} {
@@ -66,6 +66,28 @@ func TestProjectTraceMediaPreservesOrderNumbersAndErrors(t *testing.T) {
 	expected := errors.NewInternalf(errors.CodeInternal, "storage failed")
 	if _, err := projectTraceMedia(raw, 16<<20, func(m traceMedia) (string, error) { return "", expected }); !errors.Is(err, expected) {
 		t.Fatal("storage error was lost")
+	}
+}
+
+func TestProjectTraceMediaKeepsRedactedTextSiblings(t *testing.T) {
+	text := `{"type":"text","text":"Check order for [REDACTED_EMAIL] and keep the rest."}`
+	textOnly := `[{"role":"user","content":[ ` + text + ` ]}]`
+	projected, err := projectTraceMedia(textOnly, 16<<20, nil)
+	if err != nil || projected != textOnly {
+		t.Fatalf("text-only attribute changed: %s %v", projected, err)
+	}
+
+	raw := `{"content":[` + text + `,{"type":"image_url","image_url":{"url":"data:image/png;base64,[filtered_media]"}}` +
+		`,{"type":"file","mime_type":"application/pdf","data":"JVBERi1leGFtcGxl","filename":"[REDACTED_FILENAME]"}]}`
+	projected, err = projectTraceMedia(raw, 16<<20, func(m traceMedia) (string, error) {
+		if string(m.Data) != "%PDF-example" {
+			t.Fatalf("unexpected resolved media: %q", m.Data)
+		}
+		return "stored", nil
+	})
+	if err != nil || !strings.Contains(projected, `"text":"Check order for [REDACTED_EMAIL] and keep the rest."`) || !strings.Contains(projected, `"reason":"filtered"`) ||
+		!strings.Contains(projected, `"id":"stored"`) || strings.Contains(projected, "base64") {
+		t.Fatalf("mixed text and media were not projected independently: %s %v", projected, err)
 	}
 }
 
