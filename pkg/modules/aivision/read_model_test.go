@@ -138,13 +138,29 @@ func TestReadModelLiteralTagsAndNanosecondOrder(t *testing.T) {
 	require.Contains(t, where, "LOCATE(BINARY ?,BINARY p.input_text)")
 	require.Contains(t, args, "%_\\中文")
 	require.Contains(t, args, "owner")
-	order, err := readModelOrder("start_time_unix_nano.desc")
+	order, err := readModelOrder("start_time_unix_nano.desc", false)
 	require.NoError(t, err)
 	require.Contains(t, order, "p.start_ns DESC")
 	require.Contains(t, order, "p.trace_id DESC")
 	p.Filters = []nativeFilter{{Field: "span_count", Op: ">=", Value: json.Number("9007199254740993")}}
 	_, _, err = readModelWhere("org", p)
 	require.Error(t, err)
+}
+
+func TestReadModelTokenOrder(t *testing.T) {
+	expr := "CASE WHEN p.session_billable_v1=1 THEN p.session_trace_tokens_v1 ELSE NULL END"
+	for _, tc := range []struct{ order, direction string }{
+		{"total_tokens.desc", "DESC"},
+		{"attributes.gen_ai.usage.total_tokens.asc", "ASC"},
+	} {
+		order, err := readModelOrder(tc.order, true)
+		require.NoError(t, err)
+		require.Equal(t, "("+expr+" IS NULL) ASC,"+expr+" "+tc.direction+",BINARY p.trace_id "+tc.direction, order)
+		_, err = readModelOrder(tc.order, false)
+		require.Equal(t, tracePageUnsupported{"unsupported_order"}, err)
+	}
+	_, err := readModelOrder("duration_ms.desc", true)
+	require.Equal(t, tracePageUnsupported{"unsupported_order"}, err)
 }
 func TestReadModelRequiresTransactionalStore(t *testing.T) {
 	require.Equal(t, "transactional_store_unavailable", (&oceanBaseStore{}).readModelUnavailable())

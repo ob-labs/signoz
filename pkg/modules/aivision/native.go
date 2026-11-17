@@ -39,6 +39,7 @@ type nativeListParams struct {
 	IncludeSpans      bool
 	OperationFacts    bool
 	MetadataOnly      bool
+	TokenNullsLast    bool
 	SpansOnly         bool
 }
 
