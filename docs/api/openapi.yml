@@ -10683,6 +10683,299 @@ paths:
       summary: McpTools
       tags:
       - ai-vision
+  /api/v1/ai-vision/media:
+    post:
+      deprecated: false
+      description: ""
+      operationId: AIVisionMediaPOST
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                properties:
+                  data:
+                    additionalProperties: {}
+                    nullable: true
+                    type: object
+                  status:
+                    type: string
+                required:
+                - status
+                - data
+                type: object
+          description: Created
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenderErrorResponse'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenderErrorResponse'
+          description: Forbidden
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenderErrorResponse'
+          description: Internal Server Error
+      security:
+      - api_key:
+        - traces:read
+      - tokenizer:
+        - traces:read
+      summary: Write trace media
+      tags:
+      - ai-vision
+  /api/v1/ai-vision/media/{mediaID}:
+    delete:
+      deprecated: false
+      description: ""
+      operationId: AIVisionMediaDELETE
+      parameters:
+      - in: path
+        name: mediaID
+        required: true
+        schema:
+          type: string
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                properties:
+                  data:
+                    additionalProperties: {}
+                    nullable: true
+                    type: object
+                  status:
+                    type: string
+                required:
+                - status
+                - data
+                type: object
+          description: Created
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenderErrorResponse'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenderErrorResponse'
+          description: Forbidden
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenderErrorResponse'
+          description: Internal Server Error
+      security:
+      - api_key:
+        - traces:read
+      - tokenizer:
+        - traces:read
+      summary: Write trace media
+      tags:
+      - ai-vision
+    get:
+      deprecated: false
+      description: ""
+      operationId: AIVisionMediaMetadata
+      parameters:
+      - in: path
+        name: mediaID
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                properties:
+                  data:
+                    additionalProperties: {}
+                    nullable: true
+                    type: object
+                  status:
+                    type: string
+                required:
+                - status
+                - data
+                type: object
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenderErrorResponse'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenderErrorResponse'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenderErrorResponse'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenderErrorResponse'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenderErrorResponse'
+          description: Internal Server Error
+      security:
+      - api_key:
+        - traces:read
+      - tokenizer:
+        - traces:read
+      summary: MediaMetadata
+      tags:
+      - ai-vision
+  /api/v1/ai-vision/media/{mediaID}/content:
+    get:
+      deprecated: false
+      description: ""
+      operationId: AIVisionMediaContent
+      parameters:
+      - in: path
+        name: mediaID
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                properties:
+                  data:
+                    additionalProperties: {}
+                    nullable: true
+                    type: object
+                  status:
+                    type: string
+                required:
+                - status
+                - data
+                type: object
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenderErrorResponse'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenderErrorResponse'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenderErrorResponse'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenderErrorResponse'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenderErrorResponse'
+          description: Internal Server Error
+      security:
+      - api_key:
+        - traces:read
+      - tokenizer:
+        - traces:read
+      summary: MediaContent
+      tags:
+      - ai-vision
+  /api/v1/ai-vision/media/limits:
+    get:
+      deprecated: false
+      description: ""
+      operationId: AIVisionMediaLimits
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                properties:
+                  data:
+                    additionalProperties: {}
+                    nullable: true
+                    type: object
+                  status:
+                    type: string
+                required:
+                - status
+                - data
+                type: object
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenderErrorResponse'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenderErrorResponse'
+          description: Unauthorized
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenderErrorResponse'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenderErrorResponse'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenderErrorResponse'
+          description: Internal Server Error
+      security:
+      - api_key:
+        - traces:read
+      - tokenizer:
+        - traces:read
+      summary: MediaLimits
+      tags:
+      - ai-vision
   /api/v1/ai-vision/memory/operations:
     get:
       deprecated: false

@@ -22,6 +22,39 @@ func metricsTable(prefix string) string { return tableName(prefix, "metric_sampl
 func ensureSchema(ctx context.Context, db *sql.DB, prefix string) error {
 	statements := []string{
 		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+ org_id VARCHAR(255) NOT NULL, space_id VARCHAR(255) NOT NULL,
+ PRIMARY KEY(org_id,space_id)
+) DEFAULT CHARSET=utf8mb4`, tableName(prefix, "trace_media_quota")),
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+  id CHAR(64) NOT NULL,
+  org_id VARCHAR(255) NOT NULL,
+  space_id VARCHAR(255) NOT NULL,
+  agent_id VARCHAR(255) NOT NULL,
+  trace_id VARCHAR(32) NOT NULL,
+  span_id VARCHAR(16) NOT NULL,
+  direction VARCHAR(6) NOT NULL,
+  mime_type VARCHAR(64) NOT NULL,
+  sha256 CHAR(64) NOT NULL,
+  content LONGBLOB NOT NULL,
+  created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (id),
+  KEY idx_media_scope (org_id, space_id, trace_id, span_id)
+) DEFAULT CHARSET=utf8mb4`, tableName(prefix, "trace_media")),
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+  id CHAR(64) NOT NULL,
+  org_id VARCHAR(255) NOT NULL,
+  space_id VARCHAR(255) NOT NULL,
+  agent_id VARCHAR(255) NOT NULL,
+  trace_id VARCHAR(32) NOT NULL,
+  span_id VARCHAR(16) NOT NULL,
+  attribute_key VARCHAR(255) NOT NULL,
+  projected_sha256 CHAR(64) NOT NULL,
+  original LONGBLOB NOT NULL,
+  created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (id),
+  KEY idx_media_original_scope (org_id, space_id, trace_id, span_id)
+) DEFAULT CHARSET=utf8mb4`, tableName(prefix, "trace_media_original")),
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
   org_id VARCHAR(255) NOT NULL DEFAULT 'default',
   space_id VARCHAR(255) NOT NULL DEFAULT '',
   timestamp BIGINT UNSIGNED NOT NULL,

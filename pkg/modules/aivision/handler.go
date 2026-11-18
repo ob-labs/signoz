@@ -18,6 +18,8 @@ import (
 )
 
 type Handler interface {
+	TraceMedia(http.ResponseWriter, *http.Request)
+	TraceMediaWrite(http.ResponseWriter, *http.Request)
 	ReadModel(http.ResponseWriter, *http.Request)
 	Traces(http.ResponseWriter, *http.Request)
 	TracePage(http.ResponseWriter, *http.Request)
@@ -226,6 +228,15 @@ func (h *handler) SpanBatch(response http.ResponseWriter, request *http.Request)
 		h.writeBackendError(response, err)
 		return
 	}
+	if request.URL.Query().Get("media_view") != "1" {
+		if err := h.backend.restoreTraceMedia(ctx, orgID, result.Spans); err != nil {
+			h.writeBackendError(response, err)
+			return
+		}
+	} else if err := h.backend.enrichTraceMedia(ctx, orgID, result.Spans); err != nil {
+		h.writeBackendError(response, err)
+		return
+	}
 	writeJSON(response, http.StatusOK, result)
 }
 
@@ -256,6 +267,15 @@ func (h *handler) TraceDetail(response http.ResponseWriter, request *http.Reques
 	defer cancel()
 	result, err := h.backend.getTraceDetail(ctx, orgID, traceID, params)
 	if err != nil {
+		h.writeBackendError(response, err)
+		return
+	}
+	if request.URL.Query().Get("media_view") != "1" {
+		if err := h.backend.restoreTraceMedia(ctx, orgID, result.Spans); err != nil {
+			h.writeBackendError(response, err)
+			return
+		}
+	} else if err := h.backend.enrichTraceMedia(ctx, orgID, result.Spans); err != nil {
 		h.writeBackendError(response, err)
 		return
 	}
