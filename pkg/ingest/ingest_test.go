@@ -102,6 +102,35 @@ func TestBuildSpanRowsGolden(t *testing.T) {
 	}
 }
 
+func TestBuildSpanRowsPrefersTrustedAgentProduct(t *testing.T) {
+	for _, tc := range []struct {
+		name, trusted, sdk, want string
+	}{
+		{name: "DSH with overridden SDK product", trusted: "DeepSeekHarness", sdk: "local-override", want: "DeepSeekHarness"},
+		{name: "Codex with DSH SDK product", trusted: "Codex", sdk: "DeepSeekHarness", want: "Codex"},
+		{name: "legacy SDK product", sdk: "Codex", want: "Codex"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			traces := newTestTraces()
+			rs := traces.ResourceSpans().At(0)
+			resource := rs.Resource().Attributes()
+			resource.PutStr("ant.agent.product", tc.sdk)
+			if tc.trusted != "" {
+				resource.PutStr("aivision.agent.product", tc.trusted)
+			}
+			span := rs.ScopeSpans().At(0).Spans().At(0)
+			span.Attributes().PutStr("agent.product", tc.sdk)
+			rows, err := buildSpanRows(traces, "org-cfg")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := rows[0][29]; got != tc.want {
+				t.Errorf("agent_product = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func newTestLogs() plog.Logs {
 	lg := plog.NewLogs()
 	rl := lg.ResourceLogs().AppendEmpty()

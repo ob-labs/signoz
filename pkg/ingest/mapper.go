@@ -18,9 +18,10 @@ import (
 // resource attributes (mirrors antcollector pkg/ingestidentity). They survive
 // the OTLP hop, so the storage/query partition stays gateway-authoritative.
 const (
-	trustedOrgIDKey   = "aivision.org.id"
-	trustedSpaceIDKey = "aivision.space.id"
-	trustedUserIDKey  = "aivision.user.id"
+	trustedOrgIDKey        = "aivision.org.id"
+	trustedSpaceIDKey      = "aivision.space.id"
+	trustedUserIDKey       = "aivision.user.id"
+	trustedAgentProductKey = "aivision.agent.product"
 )
 
 type correlation struct {
@@ -53,9 +54,7 @@ var correlationKeys = struct {
 	},
 	product: []string{
 		"product", "product.name", "app.product", "service.namespace", "agent.product", "ant.agent.product",
-		// aivision-issued attribute (mirrors the trusted aivision.space.id /
-		// aivision.user.id namespace the gateway and agentlens self-instrumentation stamp).
-		"aivision.agent.product",
+		trustedAgentProductKey,
 	},
 	agent: []string{
 		"agent", "agent.name", "gen_ai.agent.name", "gen_ai.agent.id",
@@ -95,16 +94,17 @@ func extractCorrelation(resource, signal pcommon.Map, configuredOrgID string) co
 	} else if c.orgID == "" {
 		c.orgID = "default"
 	}
-	// Authoritative space/user identity injected by the gateway's spaceauth
-	// processor from the authenticated ingest token. Read only from the
-	// resource level (the processor strips any client-supplied copy), so a
-	// client can never steer its own storage/query partition. When absent
-	// (pre-auth rollout) we keep the client-derived value unchanged.
+	// The gateway strips client copies and stamps the authenticated space,
+	// user, and product on the resource. Those stamps override the legacy
+	// correlation labels above. Without a resource stamp, keep the legacy value.
 	if v, ok := resource.Get(trustedSpaceIDKey); ok && v.AsString() != "" {
 		c.spaceID = truncate(v.AsString(), 255)
 	}
 	if v, ok := resource.Get(trustedUserIDKey); ok && v.AsString() != "" {
 		c.userID = truncate(v.AsString(), 255)
+	}
+	if v, ok := resource.Get(trustedAgentProductKey); ok && v.AsString() != "" {
+		c.product = truncate(v.AsString(), 255)
 	}
 	if c.agentName == "" {
 		c.agentName = attributeString(resource, "service.name")
