@@ -6,6 +6,7 @@ These checks do not run Go, Docker, or GitHub Actions.
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -115,6 +116,46 @@ class GoCIConditionsTest(unittest.TestCase):
         self.assertFalse(allows(expression, "pull_request_target", labels=()))
         self.assertFalse(allows(expression, "pull_request_target", same_repository=True, labels=("safe-to-test",)))
         self.assertTrue(allows(expression, "pull_request_target", same_repository=True, actor="dependabot[bot]", labels=("safe-to-test",)))
+
+    def test_label_cleanup_targets_only_main_and_synchronize(self):
+        text = (ROOT / ".github/workflows/postci.yaml").read_text()
+        trigger = re.search(r"^on:\n(.*?)^\S", text, re.M | re.S).group(1)
+        trigger = "\n".join(
+            line for line in trigger.splitlines() if line.strip() and not line.lstrip().startswith("#")
+        )
+        self.assertEqual(
+            "  pull_request_target:\n    branches:\n      - main\n    types:\n      - synchronize",
+            trigger,
+        )
+        permissions = re.search(r"^permissions:\n(.*?)^\S", text, re.M | re.S).group(1)
+        self.assertEqual("pull-requests: write", permissions.strip())
+        self.assertNotIn("uses:", text)
+        self.assertEqual(["GITHUB_TOKEN"], re.findall(r"secrets\.([A-Z_]+)", text))
+
+    def test_label_cleanup_shell_uses_only_the_fixed_delete_endpoint(self):
+        text = (ROOT / ".github/workflows/postci.yaml").read_text()
+        script = re.search(r"^        run: \|\n((?:          .+\n)+)", text, re.M).group(1)
+        with tempfile.TemporaryDirectory() as directory:
+            fake_gh = Path(directory) / "gh"
+            calls = Path(directory) / "calls"
+            fake_gh.write_text('#!/bin/bash\nprintf "%s\\n" "$@" >> "$CALLS"\n')
+            fake_gh.chmod(0o755)
+            env = {
+                "PATH": f"{directory}:{os.defpath}",
+                "CALLS": str(calls),
+                "GITHUB_REPOSITORY": "ob-labs/signoz",
+            }
+            for number in ("", "0", "007"):
+                with self.subTest(number=number):
+                    result = subprocess.run(["bash", "-c", script], env={**env, "PR_NUMBER": number})
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertFalse(calls.exists())
+            result = subprocess.run(["bash", "-c", script], env={**env, "PR_NUMBER": "25"})
+            self.assertEqual(0, result.returncode)
+            self.assertEqual(
+                ["api", "--method", "DELETE", "repos/ob-labs/signoz/issues/25/labels/safe-to-test"],
+                calls.read_text().splitlines(),
+            )
 
     def test_pr_code_never_receives_privileged_credentials_or_shared_cache(self):
         text = GOCI.read_text()
