@@ -9,11 +9,9 @@ events. Merge queue checks remain enabled.
 
 External PRs run the broad Go jobs only when a maintainer applies `safe-to-test`
 to the reviewed head. This uses the ordinary `pull_request: labeled` event;
-there is no `pull_request_target` execution path. After an external PR head
-changes, the metadata-only `postci.yaml` clears the label; reapply it only after
-reviewing the new head. If that cleanup has not run, remove and reapply it manually.
-Other label events
-and a pre-existing label on a synchronize event do not authorize another run.
+there is no `pull_request_target` execution path for Go jobs. Neither a
+pre-existing `safe-to-test` label on a synchronize event nor applying a
+different label authorizes another run. Follow the runbook below.
 The `pull_request` branch filter applies to `main` for both internal and external
 PRs.
 
@@ -47,6 +45,44 @@ establish downstream frontend validation.
 an external/bot PR's review label after its head changes. It reads trusted event
 metadata without checkout or execution of PR-controlled code, inherited app
 credentials, or OIDC. PR-code jobs remain read-only.
+
+### Maintainer runbook: review and label cleanup
+
+On December 2, 2026, GitHub will enforce its default block on
+`pull_request_target` in public repositories without an applicable event
+policy. If the event is blocked, `postci.yaml` does not clear stale labels.
+The label is not approval for the current commit unless it was freshly
+applied to that reviewed head. The Go workflow's fresh-label requirement is
+independent of cleanup and remains in effect.
+
+**Keep automatic cleanup.** A repository administrator can configure an
+Actions workflow execution policy scoped to `ob-labs/signoz` and the exact
+workflow path `.github/workflows/postci.yaml`. Allow `pull_request_target`
+only for this workflow, subject to existing organization and enterprise
+restrictions. The workflow itself limits dispatch to `synchronize` on PRs
+targeting `main`. It must stay metadata-only: do not give it checkout, caches,
+inherited credentials, or any permission beyond the pull-request write
+token used to remove the label.
+
+Use the [GitHub Actions policy guide](https://docs.github.com/en/actions/how-tos/administer/control-workflow-execution)
+and check Policy insights and the effective inherited rules before and after
+enabling it. Check that a controlled external PR update can run this workflow
+and that its stale label is removed, without adding permissions or permitting
+`pull_request_target` for any other workflow. A scoped custom policy does not
+by itself prove other paths stay blocked: verify effective behavior on
+non-`postci.yaml` paths; if necessary, explicitly block the event elsewhere
+while retaining permitted events. Do not apply a repository-wide allow
+exception. A documentation or source merge does not configure this setting.
+
+**If cleanup is blocked or unavailable.** Check the PR's full current head SHA
+and compare it with the commit you reviewed. If they differ, review the new
+head first. Remove any old `safe-to-test` label, confirm the reviewed SHA is
+still the current head, then apply `safe-to-test` again to emit a fresh event.
+The label operation does not atomically bind a SHA. Verify the resulting Go
+run checks out the reviewed SHA before approving any queued fork run or using
+its result; if the head moved during labeling, cancel the mismatched run,
+clear the label, and repeat review. Do not trust an unchanged label or
+reuse results from a previous head.
 
 Other inherited frontend, commit, integration, and e2e suites are retained.
 Their `pull_request_target` local steps check out the base by default, so their
